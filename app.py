@@ -12,7 +12,7 @@ import sv_ttk
 
 from config import (
     APP_VERSION, PLATFORMS, DOUYIN_LAST_RUN, UPDATE_HISTORY_FILE,
-    GDL, ACCENT, _MEDIA_EXTS, THEME_COLORS, FONTS, _LOG_TAGS,
+    DOWNLOAD_PATH_FILE, GDL, ACCENT, _MEDIA_EXTS, THEME_COLORS, FONTS, _LOG_TAGS,
 )
 from utils import TextRedirector, _LineWriter, _del
 
@@ -35,6 +35,16 @@ else:
 os.chdir(_BASE_DIR)
 if _HELPERS_DIR not in sys.path:
     sys.path.insert(0, _HELPERS_DIR)
+
+def _read_download_dir() -> Path:
+    """Return the configured download root, falling back to 'downloads/'."""
+    p = Path(DOWNLOAD_PATH_FILE)
+    if p.exists():
+        custom = p.read_text(encoding="utf-8").strip()
+        if custom:
+            return Path(custom)
+    return Path("downloads")
+
 
 # ── Main application ───────────────────────────────────────────────────────────
 class App(tk.Tk):
@@ -67,7 +77,8 @@ class App(tk.Tk):
         self._user_raw:     dict[str, list[str]]       = {}
         self._user_rows:    dict[str, list[tk.Frame]]  = {}
         self._sel_row:      int | None                 = None
-        self._users_canvas: tk.Canvas                  = None   # type: ignore
+        self._users_canvas:    tk.Canvas                = None   # type: ignore
+        self._settings_canvas: tk.Canvas               = None   # type: ignore
         self._users_inner:  tk.Frame                   = None   # type: ignore
         self._canvas_win:   int                        = 0
         self._cookie_status: dict[str, tk.StringVar]  = {}
@@ -104,9 +115,10 @@ class App(tk.Tk):
         """Move files out of YYYY-MM-DD subfolders into their parent account folder."""
         import re
         date_re = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+        base  = _read_download_dir()
         roots = [
-            Path("downloads/douyin/post"),
-            *(Path("downloads") / pid for pid in PLATFORMS if pid != "douyin"),
+            base / "douyin" / "post",
+            *(base / pid for pid in PLATFORMS if pid != "douyin"),
         ]
         for root in roots:
             if not root.exists():
@@ -131,6 +143,10 @@ class App(tk.Tk):
                         date_dir.rmdir()
                     except OSError:
                         pass  # leave non-empty dirs alone
+
+    # ── Download dir ───────────────────────────────────────────────────────────
+    def _get_download_dir(self) -> Path:
+        return _read_download_dir()
 
     # ── Dialog helper ──────────────────────────────────────────────────────────
     def _centre_dialog(self, dlg: tk.Toplevel, w: int, h: int):
@@ -385,11 +401,18 @@ class App(tk.Tk):
 
     # ── Tab change ─────────────────────────────────────────────────────────────
     def _on_tab_changed(self, _event=None):
-        if self._nb.index(self._nb.select()) == 1:
+        idx = self._nb.index(self._nb.select())
+        self.unbind_all("<MouseWheel>")
+        if idx == 1:
             pid = self._selected_pid()
             self._users_title.set(PLATFORMS[pid]["label"])
             self._entry_hint.set(self._entry_hint_text(pid))
             self._load_users_for(pid)
+            self.bind_all("<MouseWheel>",
+                lambda e: self._users_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        elif idx == 2:
+            self.bind_all("<MouseWheel>",
+                lambda e: self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
     # ── Platform helpers ───────────────────────────────────────────────────────
     def _selected_pid(self) -> str:
@@ -449,9 +472,6 @@ class App(tk.Tk):
         self._users_canvas.bind(
             "<Configure>",
             lambda e: self._users_canvas.itemconfig(self._canvas_win, width=e.width))
-        self._users_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._users_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
         entry_f = ttk.Frame(inner)
         entry_f.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
@@ -694,8 +714,23 @@ class App(tk.Tk):
 
     # ── Settings ───────────────────────────────────────────────────────────────
     def _build_settings(self, parent):
-        outer = ttk.Frame(parent)
-        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=14)
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        sb     = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._settings_canvas = canvas
+
+        outer = ttk.Frame(canvas, padding=(20, 14))
+        win   = canvas.create_window((0, 0), window=outer, anchor="nw")
+
+        def _on_resize(e):
+            canvas.itemconfig(win, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+
+        def _on_frame_resize(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        outer.bind("<Configure>", _on_frame_resize)
 
         for pid, cfg in PLATFORMS.items():
             af = ttk.LabelFrame(outer, text=f"Authentication  —  {cfg['label']}", padding=10)
@@ -719,6 +754,28 @@ class App(tk.Tk):
         _options_section("Douyin — Download Options", [
             ("Parallel workers:",           "douyin_workers", 3, 1, 10),
         ])
+
+        # ── Download location ──────────────────────────────────────────────────
+        dlf = ttk.LabelFrame(outer, text="Download Location", padding=10)
+        dlf.pack(fill=tk.X, pady=(0, 10))
+
+        path_row = ttk.Frame(dlf)
+        path_row.pack(fill=tk.X)
+
+        self._dl_path_var = tk.StringVar(value=str(self._get_download_dir()))
+        ttk.Entry(path_row, textvariable=self._dl_path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        def _browse_dl():
+            folder = filedialog.askdirectory(
+                title="Select download folder",
+                initialdir=str(self._get_download_dir()),
+            )
+            if folder:
+                self._dl_path_var.set(folder)
+                Path(DOWNLOAD_PATH_FILE).write_text(folder, encoding="utf-8")
+
+        ttk.Button(path_row, text="Browse…", command=_browse_dl).pack(side=tk.LEFT)
 
         dbf = ttk.LabelFrame(outer, text="Database", padding=10)
         dbf.pack(fill=tk.X)
@@ -831,7 +888,7 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def _open_downloads(self):
-        folder = (Path("downloads") / self._selected_pid()).resolve()
+        folder = (self._get_download_dir() / self._selected_pid()).resolve()
         folder.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(folder)])
 
@@ -894,7 +951,7 @@ class App(tk.Tk):
             sys.stdout = TextRedirector(self.log, self)
             try:
                 cfg    = PLATFORMS[pid]
-                outdir = str(Path("downloads") / "url")
+                outdir = str(self._get_download_dir() / "url")
                 Path(outdir).mkdir(parents=True, exist_ok=True)
                 print(f"Post URL : {url}\n")
 
@@ -911,12 +968,12 @@ class App(tk.Tk):
                             return
                         aweme_id = _m.group(1)
                     print(f"Aweme ID : {aweme_id}\n")
-                    existing = list(Path("downloads/douyin").glob(f"**/*{aweme_id}*"))
+                    existing = list((self._get_download_dir() / "douyin").glob(f"**/*{aweme_id}*"))
                     if existing:
                         print(f"→ Already downloaded: {existing[0].name}")
                         return
                     cookie_str = self._netscape_to_cookie_str(cfg["cookies_file"])
-                    dl_outdir  = str(Path("downloads") / "url")
+                    dl_outdir  = str(self._get_download_dir() / "url")
                     import f2_one as _f2_one
                     asyncio.run(_f2_one.download_one(
                         aweme_id, cookie_str, dl_outdir,
@@ -1173,7 +1230,7 @@ class App(tk.Tk):
             import datetime as _dt
             import re as _re
             _today    = _dt.date.today().isoformat()
-            base_dir  = Path("downloads").resolve() / pid
+            base_dir  = self._get_download_dir().resolve() / pid
 
             mode_label = "Full" if is_full else "Update"
             print(f"Platform : {cfg['label']}")

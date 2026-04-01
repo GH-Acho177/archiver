@@ -10,23 +10,28 @@ block_cipher = None
 _root = Path(SPECPATH).parent   # project root  (spec lives in build/, so parent = root)
 
 # ── Package data files ─────────────────────────────────────────────────────────
-datas = []
-datas += collect_data_files('sv_ttk')     # Sun Valley theme TCL/TK files
+datas    = []
+binaries = []
+hiddenimports = []
+
+sv_ttk_datas, sv_ttk_bins, sv_ttk_hidden = collect_all('sv_ttk')
+datas         += sv_ttk_datas
+binaries      += sv_ttk_bins
+hiddenimports += sv_ttk_hidden
+
 datas += collect_data_files('f2')         # f2 language / config files
 datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
 
-# ── Bundled tool binaries (live next to this spec in build/) ───────────────────
-binaries = []
+# ── Bundled tool binaries (live next to this spec in packaging/) ───────────────
 for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
     _p = Path(SPECPATH) / _name
     if _p.exists():
         binaries.append((str(_p), '.'))
     else:
-        print(f"WARNING: {_name} not found in build/ — it will NOT be bundled.")
+        print(f"WARNING: {_name} not found in packaging/ — it will NOT be bundled.")
 
 # ── Hidden imports PyInstaller may miss ────────────────────────────────────────
-hiddenimports = [
-    'sv_ttk',
+hiddenimports += [
     'tkinter',
     'tkinter.ttk',
     'tkinter.scrolledtext',
