@@ -20,7 +20,7 @@ DefaultDirName={#DefaultInstDir}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 ; Output
-OutputDir=dist
+OutputDir=..\dist
 OutputBaseFilename=MediaDownloader_Setup_{#AppVersion}
 ; Compression
 Compression=lzma2/ultra64
@@ -32,7 +32,7 @@ PrivilegesRequired=lowest
 ; Appearance
 WizardStyle=modern
 ; Icon (comment out if you have no icon.ico yet)
-SetupIconFile=icon.ico
+SetupIconFile=..\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 ; Misc
 ShowLanguageDialog=no
@@ -45,7 +45,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; Main application (PyInstaller --onedir output)
-Source: "dist\MediaDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\MediaDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 ; Create writable data directories alongside the install (user-space)

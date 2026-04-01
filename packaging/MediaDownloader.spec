@@ -1,27 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # PyInstaller spec for Media Downloader
-# Run:  pyinstaller MediaDownloader.spec
+# Run:  pyinstaller build\MediaDownloader.spec   (from project root)
 #
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_all
 
 block_cipher = None
+_root = Path(SPECPATH).parent   # project root  (spec lives in build/, so parent = root)
 
 # ── Package data files ─────────────────────────────────────────────────────────
 datas = []
 datas += collect_data_files('sv_ttk')     # Sun Valley theme TCL/TK files
 datas += collect_data_files('f2')         # f2 language / config files
-datas += [('helpers', 'helpers')]         # f2_one.py, f2_user.py
+datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
 
-# ── Bundled tool binaries (must be present next to this spec file) ─────────────
+# ── Bundled tool binaries (live next to this spec in build/) ───────────────────
 binaries = []
 for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
-    _p = Path(_name)
+    _p = Path(SPECPATH) / _name
     if _p.exists():
         binaries.append((str(_p), '.'))
     else:
-        print(f"WARNING: {_name} not found — it will NOT be bundled.")
+        print(f"WARNING: {_name} not found in build/ — it will NOT be bundled.")
 
 # ── Hidden imports PyInstaller may miss ────────────────────────────────────────
 hiddenimports = [
@@ -42,8 +43,8 @@ hiddenimports = [
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
 a = Analysis(
-    ['app.py'],
-    pathex=[str(Path.cwd())],
+    [str(_root / 'app.py')],
+    pathex=[str(_root)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -60,6 +61,8 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # ── EXE ────────────────────────────────────────────────────────────────────────
+_icon = str(_root / 'icon.ico') if (_root / 'icon.ico').exists() else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -75,7 +78,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico' if Path('icon.ico').exists() else None,
+    icon=_icon,
 )
 
 # ── Collect (--onedir output) ──────────────────────────────────────────────────

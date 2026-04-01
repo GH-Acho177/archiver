@@ -3,8 +3,8 @@ dist/
 build/
 
 # ── Downloaded binaries (users download these separately) ─────────────────────
-gallery-dl.exe
-yt-dlp.exe
+packaging/gallery-dl.exe
+packaging/yt-dlp.exe
 
 # ── Personal config / runtime data ────────────────────────────────────────────
 config/x_cookies.txt

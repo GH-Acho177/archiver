@@ -14,17 +14,17 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-if not exist "gallery-dl.exe" (
-    echo [WARN]  gallery-dl.exe not found in this folder.
+if not exist "packaging\gallery-dl.exe" (
+    echo [WARN]  gallery-dl.exe not found in packaging\.
     echo         Download from: https://github.com/mikf/gallery-dl/releases
-    echo         Place gallery-dl.exe next to build.bat, then re-run.
+    echo         Place gallery-dl.exe in the packaging\ folder, then re-run.
     echo.
 )
 
-if not exist "yt-dlp.exe" (
-    echo [WARN]  yt-dlp.exe not found in this folder.
+if not exist "packaging\yt-dlp.exe" (
+    echo [WARN]  yt-dlp.exe not found in packaging\.
     echo         Download from: https://github.com/yt-dlp/yt-dlp/releases
-    echo         Place yt-dlp.exe next to build.bat, then re-run.
+    echo         Place yt-dlp.exe in the packaging\ folder, then re-run.
     echo.
 )
 
@@ -36,7 +36,7 @@ if not exist "icon.ico" (
 
 :: ── 2. PyInstaller build ──────────────────────────────────────────────────────
 echo [1/2] Building exe with PyInstaller...
-pyinstaller MediaDownloader.spec --clean --noconfirm
+pyinstaller packaging\MediaDownloader.spec --clean --noconfirm --workpath build --distpath dist
 if errorlevel 1 (
     echo.
     echo [ERROR] PyInstaller build failed.  See output above.
@@ -62,7 +62,7 @@ if !ISCC!=="" (
     echo         2. Re-run build.bat  -or-  open installer.iss in Inno Setup IDE
 ) else (
     echo [2/2] Creating installer with Inno Setup...
-    !ISCC! installer.iss
+    !ISCC! packaging\installer.iss
     if errorlevel 1 (
         echo [ERROR] Inno Setup failed.  See output above.
         pause & exit /b 1
