@@ -26,6 +26,9 @@ else:
     _BASE_DIR    = Path(__file__).resolve().parent
     _MEIPASS     = _BASE_DIR
     _HELPERS_DIR = str(_BASE_DIR / "helpers")
+
+# All relative paths (config/, logs/, downloads/) must resolve from the exe dir
+os.chdir(_BASE_DIR)
 if _HELPERS_DIR not in sys.path:
     sys.path.insert(0, _HELPERS_DIR)
 
