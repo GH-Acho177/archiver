@@ -276,7 +276,12 @@ class App(tk.Tk):
         ttk.Label(dlg,
                   text="Powered by gallery-dl · yt-dlp · f2",
                   font=FONTS["small"], foreground="#888888").pack(pady=(6, 0))
-        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(18, 0))
+        import webbrowser
+        ttk.Button(dlg, text="GitHub",
+                   command=lambda: webbrowser.open(
+                       "https://github.com/GH-Acho177/media-downloader")
+                   ).pack(pady=(8, 0))
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(4, 0))
         dlg.wait_window()
 
     # ── Styles ─────────────────────────────────────────────────────────────────
