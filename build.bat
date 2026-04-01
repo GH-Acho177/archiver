@@ -7,10 +7,17 @@ echo  Media Downloader -- Release Build
 echo ============================================================
 echo.
 
-:: ── 1. Check prerequisites ────────────────────────────────────────────────────
-where pyinstaller >nul 2>&1
+:: -- 1. Check prerequisites ---------------------------------------------------
+python -c "import PyInstaller" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] PyInstaller not found.  Run:  pip install pyinstaller
+    pause & exit /b 1
+)
+
+python -c "import sv_ttk" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] sv_ttk not found in the active Python environment.
+    echo         Activate your virtual environment first, then re-run build.bat.
     pause & exit /b 1
 )
 
@@ -34,9 +41,9 @@ if not exist "icon.ico" (
     echo.
 )
 
-:: ── 2. PyInstaller build ──────────────────────────────────────────────────────
+:: -- 2. PyInstaller build -----------------------------------------------------
 echo [1/2] Building exe with PyInstaller...
-pyinstaller packaging\MediaDownloader.spec --clean --noconfirm --workpath build --distpath dist
+python -m PyInstaller packaging\MediaDownloader.spec --clean --noconfirm --workpath build --distpath dist
 if errorlevel 1 (
     echo.
     echo [ERROR] PyInstaller build failed.  See output above.
@@ -45,7 +52,7 @@ if errorlevel 1 (
 echo       Done.  Output: dist\MediaDownloader\
 echo.
 
-:: ── 3. Inno Setup installer (optional) ───────────────────────────────────────
+:: -- 3. Inno Setup installer (optional) ---------------------------------------
 set ISCC=""
 for %%P in (
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -59,7 +66,7 @@ if !ISCC!=="" (
     echo [2/2] Inno Setup not found -- skipping installer creation.
     echo       To create the installer:
     echo         1. Install Inno Setup from https://jrsoftware.org/isinfo.php
-    echo         2. Re-run build.bat  -or-  open installer.iss in Inno Setup IDE
+    echo         2. Re-run build.bat  -or-  open packaging\installer.iss in Inno Setup IDE
 ) else (
     echo [2/2] Creating installer with Inno Setup...
     !ISCC! packaging\installer.iss
@@ -67,7 +74,7 @@ if !ISCC!=="" (
         echo [ERROR] Inno Setup failed.  See output above.
         pause & exit /b 1
     )
-    echo       Done.  Installer: dist\MediaDownloader_Setup_1.0.0.exe
+    echo       Done.  Installer: dist\MediaDownloader_Setup.exe
 )
 
 echo.

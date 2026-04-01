@@ -3,22 +3,31 @@
 # PyInstaller spec for Media Downloader
 # Run:  pyinstaller build\MediaDownloader.spec   (from project root)
 #
+import importlib.util as _ilu
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, collect_all
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
-_root = Path(SPECPATH).parent   # project root  (spec lives in build/, so parent = root)
+_root = Path(SPECPATH).parent   # project root  (spec lives in packaging/, so parent = root)
+
+# ── Locate sv_ttk and copy its entire package folder into the bundle ───────────
+# collect_all / collect_data_files only grab theme assets, not the .py files.
+# Copying the folder to datas works because PyInstaller adds sys._MEIPASS to
+# sys.path at runtime, making anything placed there directly importable.
+_sv = _ilu.find_spec('sv_ttk')
+if not _sv or not _sv.submodule_search_locations:
+    raise SystemExit(
+        "\n[BUILD ERROR] sv_ttk not found.\n"
+        "Activate the virtual environment that has sv_ttk installed, then re-run build.bat.\n"
+    )
+_sv_dir = list(_sv.submodule_search_locations)[0]
 
 # ── Package data files ─────────────────────────────────────────────────────────
 datas    = []
 binaries = []
 hiddenimports = []
 
-sv_ttk_datas, sv_ttk_bins, sv_ttk_hidden = collect_all('sv_ttk')
-datas         += sv_ttk_datas
-binaries      += sv_ttk_bins
-hiddenimports += sv_ttk_hidden
-
+datas += [(_sv_dir, 'sv_ttk')]            # sv_ttk package (Python + theme assets)
 datas += collect_data_files('f2')         # f2 language / config files
 datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
 
@@ -32,6 +41,7 @@ for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
 
 # ── Hidden imports PyInstaller may miss ────────────────────────────────────────
 hiddenimports += [
+    'sv_ttk',
     'tkinter',
     'tkinter.ttk',
     'tkinter.scrolledtext',
