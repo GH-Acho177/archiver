@@ -1,0 +1,33 @@
+# ── Build output ──────────────────────────────────────────────────────────────
+dist/
+build/
+
+# ── Downloaded binaries (users download these separately) ─────────────────────
+gallery-dl.exe
+yt-dlp.exe
+
+# ── Personal config / runtime data ────────────────────────────────────────────
+config/x_cookies.txt
+config/douyin_cookies.txt
+config/bilibili_cookies.txt
+config/x_users.txt
+config/douyin_users.txt
+config/bilibili_users.txt
+config/x_downloaded.db
+config/douyin_users.db
+config/bilibili_downloaded.txt
+config/douyin_last_run.json
+config/seen_announcements.json
+config/update_history.json
+
+# ── Logs & downloads ──────────────────────────────────────────────────────────
+logs/
+downloads/
+
+# ── IDE / tooling ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
