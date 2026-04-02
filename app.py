@@ -85,6 +85,9 @@ class App(tk.Tk):
 
         self._log_widget: scrolledtext.ScrolledText | None = None
 
+        Path("config").mkdir(exist_ok=True)
+        Path("downloads").mkdir(exist_ok=True)
+        Path("logs").mkdir(exist_ok=True)
         self._migrate_legacy_files()
         self._build_ui()
         self._refresh_from_date(self._platform_ids[0])
@@ -773,6 +776,7 @@ class App(tk.Tk):
             )
             if folder:
                 self._dl_path_var.set(folder)
+                Path(DOWNLOAD_PATH_FILE).parent.mkdir(parents=True, exist_ok=True)
                 Path(DOWNLOAD_PATH_FILE).write_text(folder, encoding="utf-8")
 
         ttk.Button(path_row, text="Browse…", command=_browse_dl).pack(side=tk.LEFT)
@@ -989,6 +993,7 @@ class App(tk.Tk):
                     self._proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                     for line in self._proc.stdout:
                         if "api.day.app" in line or "Bark notification" in line:
@@ -1198,6 +1203,7 @@ class App(tk.Tk):
         )
         if not src:
             return
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         self._cookie_status[pid].set(
             f"✓  {dest.name} found  ({dest.stat().st_size // 1024} KB)")
@@ -1466,6 +1472,7 @@ class App(tk.Tk):
                         cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                     user_suspended       = False
                     _completed_posts: list[str] = []
@@ -1563,6 +1570,7 @@ class App(tk.Tk):
                         cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                     user_suspended = False
                     for line in self._proc.stdout:

@@ -1,6 +1,18 @@
-# Media Downloader GUI
+# Media Downloader
 
-A Windows desktop app for batch-downloading media from **X (Twitter)** and **Douyin**, built with Tkinter + Sun Valley theme.
+A Windows desktop app for batch-downloading media from **X (Twitter)**, **Douyin**, and **Bilibili**, built with Tkinter + Sun Valley theme.
+
+---
+
+## Features
+
+- Batch download media from multiple accounts across platforms
+- **Update mode** — only fetch new posts since the last run
+- **Full mode** — download everything (with optional date range)
+- Single video download by pasting a URL
+- Per-platform cookie authentication
+- Live log output with start / stop controls
+- Dark and light theme
 
 ---
 
@@ -10,89 +22,61 @@ A Windows desktop app for batch-downloading media from **X (Twitter)** and **Dou
 |------|---------|
 | Python 3.10+ | Runtime |
 | `sv_ttk` | Windows 11-style UI theme |
-| `gallery-dl` | X (Twitter) downloads |
 | `f2` | Douyin downloads |
+| `gallery-dl` | X (Twitter) downloads |
 | `yt-dlp` | Bilibili downloads |
 
 ```
-pip install sv_ttk f2 gallery-dl yt-dlp
+pip install sv_ttk f2 aiohttp aiofiles
+```
+
+`gallery-dl` and `yt-dlp` are used as standalone executables — see [Building from Source](#building-from-source).
+
+---
+
+## Running from Source
+
+```
+python app.py
 ```
 
 ---
 
-## Quick Start
+## Platform Support
 
-Double-click **`x_download.bat`**, or:
+### X (Twitter)
+- Downloads media from user `/media` pages via `gallery-dl`
+- Skips already-downloaded posts using a SQLite archive (`config/x_downloaded.db`)
+- Add users by plain username (e.g. `elonmusk`)
+- **Import Following**: fetches your follow list so you can pick accounts to add
 
-```
-python x_gui.py
-```
+### Douyin
+- Downloads posts via `f2`
+- **Update mode** stores the last-run date per user — only new posts are fetched on the next run
+- **Full mode** downloads everything, with an optional "last N days" range
+- Add users in `nickname|sec_uid` format (the app displays the nickname)
+- **Download Post URL**: paste any Douyin video URL to download a single video
+
+### Bilibili
+- Downloads videos via `yt-dlp`
+- Add users in `nickname|uid` format (UID is the number in the profile URL)
 
 ---
 
-## Features
-
-### Platform Support
-- **X (Twitter)** — downloads media from user `/media` pages via `gallery-dl`
-- **Douyin** — downloads posts via `f2`, with smart date-interval update mode
-
-### Tabs
+## Tabs
 
 **Dashboard**
-- Platform selector (collapsible card list)
-- Full / Update mode toggle
+- Platform selector, mode toggle (Update / Full), date range control
 - Start / Stop controls
 - Live log output
-- Sleep tuning between requests and users
 
 **Users**
 - Checklist of accounts per platform — only checked users are downloaded
-- Add / remove users; changes auto-saved
-- X: plain username · Douyin: `nickname|sec_uid` (displays nickname only)
-- **Import Following** (X): fetches your follow list and lets you pick accounts
-- **Download Post URL** (Douyin): paste any post/modal URL to download a single video
+- Add / remove users with auto-save
 
 **Settings**
-- Cookie import — browse to a Netscape-format `cookies.txt` file per platform
-- Cookie status indicator per platform
-
-### Download Organisation
-
-```
-downloads/
-  x/
-    username/
-      2026-03-23/        ← date downloaded
-        post_id_1.jpg
-        post_id_2.mp4
-  douyin/
-    nickname/
-      2026-03-23/
-        create_awemeid.mp4
-    total/               ← single-URL downloads
-      2026-03-23/
-        nickname_create_awemeid.mp4
-```
-
-### Update Mode (Douyin)
-Stores the last-run date per user in `config/douyin_last_run.json`. On next run, f2 is given a `start|end` date interval so only new posts are fetched — no full re-scan needed.
-
-### Archive (X)
-Downloaded post IDs are recorded in `config/x_downloaded.db` (SQLite). Re-running in Full mode skips already-downloaded posts automatically.
-
----
-
-## Config Files
-
-```
-config/
-  x_users.txt            one username per line
-  douyin_users.txt       one "nickname|sec_uid" per line
-  x_cookies.txt          Netscape cookie file (see Getting Cookies below)
-  douyin_cookies.txt     Netscape cookie file (see Getting Cookies below)
-  x_downloaded.db        gallery-dl SQLite archive
-  douyin_last_run.json   last download date per Douyin sec_uid
-```
+- Import a `cookies.txt` file per platform
+- Cookie status indicator
 
 ---
 
@@ -100,10 +84,10 @@ config/
 
 Cookies must be exported from your browser as a **Netscape-format `.txt` file**.
 
-1. Install the **[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** extension in Chrome/Edge (or an equivalent for Firefox).
-2. Log in to the platform in your browser.
-3. Click the extension icon while on that site → **Export** → save the file.
-4. In the app go to **Settings → Authentication** → click **Import cookies.txt** and select the file.
+1. Install the **[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** extension in Chrome/Edge (or equivalent for Firefox)
+2. Log in to the platform in your browser
+3. Click the extension icon on that site → **Export** → save the file
+4. In the app go to **Settings → Authentication** → click **Import cookies.txt**
 
 | Platform | Log in at |
 |----------|-----------|
@@ -111,27 +95,99 @@ Cookies must be exported from your browser as a **Netscape-format `.txt` file**.
 | Douyin | `douyin.com` |
 | Bilibili | `bilibili.com` |
 
-Cookies expire when you log out or after a period of inactivity. Re-export and re-import if downloads start failing with auth errors.
+Cookies expire when you log out or after inactivity. Re-export and re-import if downloads start failing with auth errors.
 
 ---
 
 ## Adding Users
 
-**X:** enter the plain username (e.g. `elonmusk`)
+**X** — plain username:
+```
+elonmusk
+```
 
-**Douyin:** use the `nickname|sec_uid` format. The sec_uid is the long string in the profile URL:
+**Douyin** — `nickname|sec_uid` (sec_uid is the long string in the profile URL):
 ```
 https://www.douyin.com/user/MS4wLjABAAAA...
                               ↑ this part
 ```
-Display name can be anything recognisable to you.
+```
+SomeName|MS4wLjABAAAA...
+```
+
+**Bilibili** — `nickname|uid` (UID is the number in the profile URL):
+```
+https://space.bilibili.com/12345678/video
+                            ↑ this part
+```
+```
+SomeName|12345678
+```
 
 ---
 
-## Download Post URL (Douyin)
+## Download Layout
 
-Paste any of these URL formats into the **Post URL** dialog:
+```
+downloads/
+  x/
+    username/
+      post_id.jpg
+      post_id.mp4
+  douyin/
+    nickname/
+      create_awemeid.mp4
+    total/                 ← single-URL downloads
+      nickname_create_awemeid.mp4
+  bilibili/
+    nickname/
+      video_title.mp4
+```
 
-- `https://www.douyin.com/video/7619894879615526884`
-- `https://www.douyin.com/user/self?modal_id=7619894879615526884&...`
-- `https://v.douyin.com/xxxxxxx/` (short share link)
+---
+
+## Config Files
+
+```
+config/
+  x_users.txt              one username per line
+  douyin_users.txt         one "nickname|sec_uid" per line
+  bilibili_users.txt       one "nickname|uid" per line
+  x_cookies.txt            Netscape cookie file
+  douyin_cookies.txt       Netscape cookie file
+  bilibili_cookies.txt     Netscape cookie file
+  x_downloaded.db          gallery-dl SQLite archive (X)
+  douyin_users.db          f2 SQLite database (Douyin)
+  douyin_last_run.json     last download date per Douyin user
+  update_history.json      run history shown in the dashboard
+```
+
+---
+
+## Building from Source
+
+**1. Install dependencies**
+```
+pip install pyinstaller sv_ttk f2 aiohttp aiofiles
+```
+
+**2. Place tool binaries in `packaging/`**
+
+| File | Download from |
+|------|--------------|
+| `gallery-dl.exe` | [github.com/mikf/gallery-dl/releases](https://github.com/mikf/gallery-dl/releases) |
+| `yt-dlp.exe` | [github.com/yt-dlp/yt-dlp/releases](https://github.com/yt-dlp/yt-dlp/releases) |
+
+**3. (Optional) Install Inno Setup** for a `Setup.exe` installer
+Download from [jrsoftware.org/isinfo.php](https://jrsoftware.org/isinfo.php)
+
+**4. Run the build**
+```
+build.bat
+```
+
+**Output**
+```
+dist\MediaDownloader\                    ← portable app
+dist\MediaDownloader_Setup_x.x.x.exe    ← installer (if Inno Setup is present)
+```
