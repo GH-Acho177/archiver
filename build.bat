@@ -35,9 +35,9 @@ if not exist "packaging\yt-dlp.exe" (
     echo.
 )
 
-if not exist "icon.ico" (
-    echo [WARN]  icon.ico not found -- the exe will use the default Python icon.
-    echo         Add a 256x256 icon.ico next to build.bat to brand the app.
+if not exist "assets\icon.ico" (
+    echo [WARN]  assets\icon.ico not found -- the exe will use the default Python icon.
+    echo         Add a 256x256 icon.ico to assets\ to brand the app.
     echo.
 )
 

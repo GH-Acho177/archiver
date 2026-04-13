@@ -30,6 +30,10 @@ hiddenimports = []
 datas += [(_sv_dir, 'sv_ttk')]            # sv_ttk package (Python + theme assets)
 datas += collect_data_files('f2')         # f2 language / config files
 datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
+if (_root / 'fonts').exists():
+    datas += [(str(_root / 'fonts'), 'fonts')]   # bundled fonts (e.g. JetBrains Mono)
+if (_root / 'assets' / 'icon.ico').exists():
+    datas += [(str(_root / 'assets' / 'icon.ico'), 'assets')]  # tray / window icon
 
 # ── Bundled tool binaries (live next to this spec in packaging/) ───────────────
 for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
@@ -41,6 +45,8 @@ for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
 
 # ── Hidden imports PyInstaller may miss ────────────────────────────────────────
 hiddenimports += [
+    'src.config',
+    'src.utils',
     'sv_ttk',
     'tkinter',
     'tkinter.ttk',
@@ -54,6 +60,10 @@ hiddenimports += [
     'f2.utils.utils',
     'aiohttp',
     'aiofiles',
+    'pystray',
+    'pystray._win32',
+    'PIL',
+    'PIL.Image',
 ]
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
@@ -66,7 +76,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'pandas', 'PIL', 'pytest'],
+    excludes=['matplotlib', 'numpy', 'pandas', 'pytest'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -76,7 +86,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # ── EXE ────────────────────────────────────────────────────────────────────────
-_icon = str(_root / 'icon.ico') if (_root / 'icon.ico').exists() else None
+_icon = str(_root / 'assets' / 'icon.ico') if (_root / 'assets' / 'icon.ico').exists() else None
 
 exe = EXE(
     pyz,

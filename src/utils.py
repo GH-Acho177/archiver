@@ -1,7 +1,7 @@
 import tkinter as tk
 from pathlib import Path
 
-from config import _LOG_TAGS
+from src.config import _LOG_TAGS
 
 
 # ── Thread-safe stdout → Text widget ──────────────────────────────────────────

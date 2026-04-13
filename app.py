@@ -9,18 +9,22 @@ import shutil
 from pathlib import Path
 
 import sv_ttk
+import ctypes as _ctypes
 
-from config import (
-    APP_VERSION, PLATFORMS, DOUYIN_LAST_RUN, UPDATE_HISTORY_FILE,
-    DOWNLOAD_PATH_FILE, GDL, ACCENT, _MEDIA_EXTS, THEME_COLORS, FONTS, _LOG_TAGS,
-)
-from utils import TextRedirector, _LineWriter, _del
+# Enable system DPI awareness before any Tk window is created.
+# Without this, Windows bitmap-scales the whole window on high-DPI displays,
+# which makes text look jagged/blurry. Must run before tk.Tk().
+try:
+    _ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    try:
+        _ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
-# ── Frozen-mode setup (PyInstaller --onedir) ───────────────────────────────────
+# ── Path setup (must come before any local imports) ───────────────────────────
 if getattr(sys, "frozen", False):
     _BASE_DIR    = Path(sys.executable).parent
-    # PyInstaller 6+ places binaries/data in _internal/ (sys._MEIPASS)
-    # Add both the exe dir and _internal to PATH so gallery-dl/yt-dlp are found
     _MEIPASS     = Path(getattr(sys, "_MEIPASS", _BASE_DIR))
     _HELPERS_DIR = str(_MEIPASS / "helpers")
     os.environ["PATH"] = (str(_BASE_DIR) + os.pathsep +
@@ -31,10 +35,37 @@ else:
     _MEIPASS     = _BASE_DIR
     _HELPERS_DIR = str(_BASE_DIR / "helpers")
 
-# All relative paths (config/, logs/, downloads/) must resolve from the exe dir
+# Runtime data (config/, downloads/, logs/) resolves from exe/project root
 os.chdir(_BASE_DIR)
 if _HELPERS_DIR not in sys.path:
     sys.path.insert(0, _HELPERS_DIR)
+
+from src.config import (
+    APP_VERSION, PLATFORMS, SETTINGS_FILE, DOUYIN_LAST_RUN, UPDATE_HISTORY_FILE,
+    DOWNLOAD_PATH_FILE, LANG_FILE, GDL, ACCENT, _MEDIA_EXTS,
+    THEME_COLORS, FONTS, _LOG_TAGS, STRINGS,
+)
+from src.utils import TextRedirector, _LineWriter, _del
+
+try:
+    import pystray
+    from PIL import Image as _PILImage
+    _TRAY_AVAILABLE = True
+except ImportError:
+    _TRAY_AVAILABLE = False
+
+# ── Bundle font loading ────────────────────────────────────────────────────────
+def _load_bundled_fonts(tk_root=None):
+    """Load bundled .ttf files via GDI.  Call after tk.Tk() exists."""
+    _FR_PRIVATE = 0x10
+    _gdi        = _ctypes.windll.gdi32
+    _fonts_dir  = _MEIPASS / "fonts"
+    if not _fonts_dir.exists():
+        return
+    for _ttf in _fonts_dir.glob("*.ttf"):
+        _gdi.AddFontResourceExW(str(_ttf), _FR_PRIVATE, 0)
+    if tk_root is not None:
+        tk_root.tk.eval("font families")
 
 def _read_download_dir() -> Path:
     """Return the configured download root, falling back to 'downloads/'."""
@@ -50,13 +81,33 @@ def _read_download_dir() -> Path:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.withdraw()             # hide until fully built to avoid size flash
+        _load_bundled_fonts(self)   # must be after Tk() but before any font use
+        # Compute scale factor now that we have real DPI (SetProcessDpiAwareness
+        # was called at module level so winfo_fpixels returns the actual value).
+        _raw_dpi = self.winfo_fpixels('1i')
+        self._sf: float = max(1.0, _raw_dpi / 96)   # 1.0 at 96 dpi, 1.5 at 144 dpi, etc.
+        self.tk.call('tk', 'scaling', _raw_dpi / 72.0)
         self.title(f"Media Downloader v{APP_VERSION}")
-        self.geometry("1080x740")
-        self.minsize(860, 580)
+        _ico = _MEIPASS / "assets" / "icon.ico"
+        if _ico.exists():
+            self.iconbitmap(str(_ico))
+        self.geometry(f"{int(1080 * self._sf)}x{int(740 * self._sf)}")
+        self.minsize(int(860 * self._sf), int(580 * self._sf))
 
         self._current_theme = "dark"
         sv_ttk.set_theme("dark")
         self._patch_styles()
+
+        # i18n
+        self._lang: str = "en"
+        self._i18n: list = []   # [(widget, key), ...]
+        try:
+            saved = Path(LANG_FILE).read_text(encoding="utf-8").strip()
+            if saved in STRINGS:
+                self._lang = saved
+        except Exception:
+            pass
 
         self.running    = False
         self.stop_flag  = threading.Event()
@@ -67,7 +118,7 @@ class App(tk.Tk):
         self._platform_ids:   list[str]              = list(PLATFORMS.keys())
         self._platform_sel:   tk.StringVar            = tk.StringVar(value=self._platform_ids[0])
         self._platform_pills: dict[str, tk.Label]     = {}
-        self._mode_btns:      dict[str, ttk.Button]   = {}
+        self._mode_btns:      dict[str, tk.Label]       = {}
         self._from_days_var = tk.StringVar(value="0")
         self._from_days_sb: ttk.Spinbox | None = None
 
@@ -91,6 +142,70 @@ class App(tk.Tk):
         self._migrate_legacy_files()
         self._build_ui()
         self._refresh_from_date(self._platform_ids[0])
+
+        self._tray_icon: "pystray.Icon | None" = None
+        self._setup_tray()
+        self.deiconify()            # show now that layout is complete
+
+    # ── System tray ────────────────────────────────────────────────────────────
+    def _setup_tray(self):
+        if not _TRAY_AVAILABLE:
+            self.protocol("WM_DELETE_WINDOW", self._quit_app)
+            return
+
+        # Load icon image once and reuse across tray icon instances.
+        icon_path = _MEIPASS / "assets" / "icon.ico"
+        if icon_path.exists():
+            self._tray_img = _PILImage.open(icon_path).convert("RGBA").resize((64, 64))
+        else:
+            self._tray_img = _PILImage.new("RGBA", (64, 64), color=(0, 103, 192, 255))
+
+        self._tray_icon = None
+        self.protocol("WM_DELETE_WINDOW", self._quit_app)
+        self.bind("<Unmap>", self._on_unmap)
+
+    def _make_tray_icon(self) -> "pystray.Icon":
+        """Create a fresh Icon instance (pystray icons cannot be reused after stop())."""
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", self._restore_from_tray, default=True),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", self._quit_app),
+        )
+        return pystray.Icon(
+            "MediaDownloader",
+            icon=self._tray_img,
+            title=f"Media Downloader v{APP_VERSION}",
+            menu=menu,
+        )
+
+    def _on_unmap(self, event):
+        # Only act on the iconic (minimized) state, not on withdraw() calls.
+        if event.widget is self and self.state() == "iconic":
+            self._hide_to_tray()
+
+    def _hide_to_tray(self):
+        # withdraw() removes the window AND its taskbar button completely.
+        # The <Unmap> handler won't re-enter because state becomes "withdrawn".
+        self.withdraw()
+        self._tray_icon = self._make_tray_icon()
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
+
+    def _restore_from_tray(self, icon=None, item=None):
+        """Called from the tray thread — stop the icon there, then restore the window."""
+        if icon is not None:
+            icon.stop()
+        self.after(0, self._do_restore)
+
+    def _do_restore(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _quit_app(self, icon=None, item=None):
+        """Stop the tray icon (from its own thread if coming from menu) then exit."""
+        if icon is not None:
+            icon.stop()
+        self.after(0, self.destroy)
 
     # ── Legacy migration ───────────────────────────────────────────────────────
     @staticmethod
@@ -151,6 +266,26 @@ class App(tk.Tk):
     def _get_download_dir(self) -> Path:
         return _read_download_dir()
 
+    # ── Persistent settings ────────────────────────────────────────────────────
+    def _load_settings(self) -> dict:
+        import json as _j
+        try:
+            if Path(SETTINGS_FILE).exists():
+                return _j.loads(Path(SETTINGS_FILE).read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _load_setting(self, key: str, default):
+        return self._load_settings().get(key, default)
+
+    def _save_setting(self, key: str, value):
+        import json as _j
+        data = self._load_settings()
+        data[key] = value
+        Path(SETTINGS_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(SETTINGS_FILE).write_text(_j.dumps(data, indent=2), encoding="utf-8")
+
     # ── Dialog helper ──────────────────────────────────────────────────────────
     def _centre_dialog(self, dlg: tk.Toplevel, w: int, h: int):
         self.update_idletasks()
@@ -158,46 +293,85 @@ class App(tk.Tk):
         rw, rh = self.winfo_width(), self.winfo_height()
         dlg.geometry(f"{w}x{h}+{rx + (rw - w)//2}+{ry + (rh - h)//2}")
 
-    def _show_about(self):
-        dlg = tk.Toplevel(self)
-        dlg.title("About Media Downloader")
-        dlg.resizable(False, False)
-        dlg.grab_set()
-        self._centre_dialog(dlg, 360, 220)
-
-        ttk.Label(dlg, text="Media Downloader",
-                  font=FONTS["title"]).pack(pady=(24, 2))
-        ttk.Label(dlg, text=f"Version {APP_VERSION}",
-                  font=FONTS["small"], foreground="#888888").pack()
-        ttk.Separator(dlg).pack(fill=tk.X, padx=24, pady=14)
-        ttk.Label(dlg,
-                  text="Batch-download media from X (Twitter),\nDouyin, and Bilibili.",
-                  font=FONTS["body"], justify=tk.CENTER).pack()
-        ttk.Label(dlg,
-                  text="Powered by gallery-dl · yt-dlp · f2",
-                  font=FONTS["small"], foreground="#888888").pack(pady=(6, 0))
-        import webbrowser
-        ttk.Button(dlg, text="GitHub",
-                   command=lambda: webbrowser.open(
-                       "https://github.com/GH-Acho177/media-downloader")
-                   ).pack(pady=(8, 0))
-        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(4, 0))
-        dlg.wait_window()
-
     # ── Styles ─────────────────────────────────────────────────────────────────
     def _patch_styles(self):
-        s   = ttk.Style()
-        red = "#ff6b6b" if self._current_theme == "dark" else "#c42b1c"
-        s.configure("Danger.TButton",  foreground=red)
+        s = ttk.Style()
+        c = THEME_COLORS[self._current_theme]
+        red = "#f75464" if self._current_theme == "dark" else "#c42b1c"
+
+        s.configure("Danger.TButton", foreground=red)
         s.map("Danger.TButton",
               foreground=[("disabled", "#666666"), ("active", red)])
-        s.configure("TNotebook.Tab",     focuscolor=s.lookup("TNotebook", "background"))
+
+        light_blue = "#6ab4f5"
+        s.configure("About.TButton", foreground=light_blue)
+        s.map("About.TButton",
+              foreground=[("active", "#90caff")])
+
         s.configure("TLabelframe.Label", font=FONTS["heading"])
-        s.configure("TLabel",            font=FONTS["body"])
-        s.configure("TButton",           font=FONTS["body"])
-        s.configure("TCheckbutton",      font=FONTS["body"])
-        s.configure("TRadiobutton",      font=FONTS["body"])
-        s.configure("TSpinbox",          font=FONTS["body"])
+        s.configure("TLabel",      font=FONTS["body"])
+        s.configure("TButton",     font=FONTS["body"], padding=(12, 6))
+        s.configure("TCheckbutton", font=FONTS["body"])
+        s.configure("TRadiobutton", font=FONTS["body"])
+        s.configure("TSpinbox",    font=FONTS["body"], padding=(8, 6))
+        s.configure("TEntry",      font=FONTS["body"], padding=(8, 6))
+        s.configure("TCombobox",   font=FONTS["body"], padding=(8, 6))
+
+        # Thin accent-coloured progress bar
+        s.configure("Horizontal.TProgressbar",
+                    troughcolor=c["border"],
+                    background=c["accent"],
+                    borderwidth=0,
+                    thickness=4)
+
+        # Slim scrollbar
+        _sb = max(6, int(8 * self._sf))
+        s.configure("TScrollbar", width=_sb, arrowsize=_sb)
+
+        # Separators match border colour
+        s.configure("TSeparator", background=c["border"])
+
+    # ── i18n ───────────────────────────────────────────────────────────────────
+    def _t(self, key: str) -> str:
+        """Return translated string for the current language."""
+        return STRINGS.get(self._lang, STRINGS["en"]).get(key, STRINGS["en"].get(key, key))
+
+    def _reg(self, widget, key: str):
+        """Register a widget for language updates; returns the widget."""
+        self._i18n.append((widget, key))
+        return widget
+
+    def _apply_lang(self):
+        """Push current language to all registered widgets."""
+        for widget, key in self._i18n:
+            try:
+                widget.configure(text=self._t(key))
+            except tk.TclError:
+                pass
+        # Nav text labels (order matches NAV_ITEMS)
+        nav_keys = ["nav.dashboard", "nav.users", "nav.settings", "nav.about"]
+        for i, (_, _, text_lbl, _) in enumerate(self._nav_frames):
+            if i < len(nav_keys):
+                text_lbl.configure(text=self._t(nav_keys[i]))
+        # Mode buttons
+        for val, btn in self._mode_btns.items():
+            btn.configure(text=self._t(f"mode.{val}"))
+        # Theme toggle button label
+        if hasattr(self, "_theme_toggle_btn"):
+            self._theme_toggle_btn.configure(
+                text=self._t("btn.switch_light") if self._current_theme == "dark"
+                else self._t("btn.switch_dark"))
+        self._nav_select(self._active_nav)
+
+    def _set_lang(self, lang: str):
+        if lang == self._lang:
+            return
+        self._lang = lang
+        try:
+            Path(LANG_FILE).write_text(lang, encoding="utf-8")
+        except Exception:
+            pass
+        self._apply_lang()
 
     def _toggle_theme(self):
         self._current_theme = "light" if self._current_theme == "dark" else "dark"
@@ -209,64 +383,203 @@ class App(tk.Tk):
         if self._log_widget:
             self._log_widget.configure(bg=c["log_bg"], fg=c["log_fg"])
             self._configure_log_tags()
-        self._theme_btn.configure(
-            text="☀  Light" if self._current_theme == "dark" else "🌙  Dark")
+        if hasattr(self, '_theme_toggle_btn'):
+            self._theme_toggle_btn.configure(
+                text=self._t("btn.switch_light") if self._current_theme == "dark"
+                else self._t("btn.switch_dark"))
+        self._refresh_chrome_theme()
 
     # ── UI skeleton ────────────────────────────────────────────────────────────
     def _build_ui(self):
-        bar = ttk.Frame(self)
-        bar.pack(fill=tk.X, padx=16, pady=(12, 0))
-        ttk.Label(bar, text="Media Downloader",
-                  font=FONTS["title"]).pack(side=tk.LEFT)
-        self._theme_btn = ttk.Button(bar, text="☀  Light", command=self._toggle_theme)
-        self._theme_btn.pack(side=tk.RIGHT)
-        ttk.Button(bar, text="About", command=self._show_about).pack(side=tk.RIGHT, padx=(0, 6))
+        c = THEME_COLORS[self._current_theme]
 
-        ttk.Separator(self).pack(fill=tk.X, padx=16, pady=(10, 0))
+        self._toolbar_sep = tk.Frame(self, bg=c["border"], height=1)
+        self._toolbar_sep.pack(fill=tk.X, side=tk.TOP)
 
-        self._nb = ttk.Notebook(self, takefocus=False)
-        self._nb.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+        # ── Status bar — packed to BOTTOM before main so it isn't squeezed ───
+        self._build_statusbar(c)
 
-        dash      = ttk.Frame(self._nb); self._nb.add(dash,      text="  Dashboard  ")
-        users_tab = ttk.Frame(self._nb); self._nb.add(users_tab, text="  Users  ")
-        sett_tab  = ttk.Frame(self._nb); self._nb.add(sett_tab,  text="  Settings  ")
+        # ── Main: sidebar (160 px) + stacked content panels ───────────────────
+        self._main = tk.Frame(self, bg=c["bg"])
+        self._main.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
+
+        self._sidebar = tk.Frame(self._main, bg=c["panel"], width=int(180 * self._sf))
+        self._sidebar.pack(fill=tk.Y, side=tk.LEFT)
+        self._sidebar.pack_propagate(False)
+
+        self._sidebar_sep = tk.Frame(self._main, bg=c["border"], width=1)
+        self._sidebar_sep.pack(fill=tk.Y, side=tk.LEFT)
+
+        self._content = tk.Frame(self._main, bg=c["bg"])
+        self._content.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+
+        # Stacked panels — all placed to fill content; .lift() reveals active
+        dash      = tk.Frame(self._content, bg=c["bg"])
+        users_tab = tk.Frame(self._content, bg=c["bg"])
+        sett_tab  = tk.Frame(self._content, bg=c["bg"])
+        about_tab = tk.Frame(self._content, bg=c["bg"])
+        self._panels = [dash, users_tab, sett_tab, about_tab]
+        # Panels are shown/hidden via pack/pack_forget — only the active one
+        # is in the layout so tkinter never renders the others.
 
         self._build_dashboard(dash)
         self._build_users(users_tab)
         self._build_settings(sett_tab)
+        self._build_about_panel(about_tab)
 
-        self._nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # Sidebar nav items
+        self._nav_frames: list[tuple] = []
+        tk.Frame(self._sidebar, bg=c["panel"], height=int(10 * self._sf)).pack(fill=tk.X)
+        for idx, (icon, key) in enumerate([
+                ("◈", "nav.dashboard"), ("☰", "nav.users"),
+                ("⚙", "nav.settings"), ("ℹ", "nav.about")]):
+            self._build_nav_item(self._sidebar, idx, icon, key)
+
+        self._active_nav = -1
+        self._nav_select(0)
+
+    # ── Status bar ─────────────────────────────────────────────────────────────
+    def _build_statusbar(self, c):
+        self._statusbar_sep = tk.Frame(self, bg=c["border"], height=1)
+        self._statusbar_sep.pack(fill=tk.X, side=tk.BOTTOM)
+        self._statusbar = tk.Frame(self, bg=c["panel"], height=int(30 * self._sf))
+        self._statusbar.pack(fill=tk.X, side=tk.BOTTOM)
+        self._statusbar.pack_propagate(False)
+        self.status_var = tk.StringVar(value="Ready")
+        self._status_lbl = tk.Label(
+            self._statusbar, textvariable=self.status_var,
+            font=FONTS["small"], bg=c["panel"], fg=c["text_dim"], padx=8)
+        self._status_lbl.pack(side=tk.LEFT, pady=3)
+        self.progress = ttk.Progressbar(
+            self._statusbar, mode="indeterminate", length=120)
+        self.progress.pack(side=tk.RIGHT, padx=8, pady=3)
+
+    # ── Sidebar nav ────────────────────────────────────────────────────────────
+    def _build_nav_item(self, parent, idx: int, icon: str, key: str):
+        c = THEME_COLORS[self._current_theme]
+
+        _sf = self._sf
+        row = tk.Frame(parent, bg=c["panel"], cursor="hand2", height=int(44 * _sf))
+        row.pack(fill=tk.X, side=tk.TOP)
+        row.pack_propagate(False)
+
+        bar = tk.Frame(row, bg=c["panel"], width=max(3, int(4 * _sf)))
+        bar.pack(side=tk.LEFT, fill=tk.Y)
+
+        _ipad = int(6 * _sf)
+        _ipad2 = max(2, int(3 * _sf))
+        _vpad = int(8 * _sf)
+        icon_lbl = tk.Label(row, text=icon, font=FONTS["body"],
+                            bg=c["panel"], fg=c["text_dim"],
+                            width=2, anchor="center")
+        icon_lbl.pack(side=tk.LEFT, padx=(_ipad, _ipad2), pady=_vpad)
+
+        text_lbl = tk.Label(row, text=self._t(key), font=FONTS["body"],
+                            bg=c["panel"], fg=c["text"], anchor="w")
+        text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=_vpad)
+
+        self._nav_frames.append((bar, icon_lbl, text_lbl, row))
+
+        for w in (row, icon_lbl, text_lbl):
+            w.bind("<Button-1>", lambda _e, i=idx: self._nav_select(i))
+            w.bind("<Enter>",    lambda _e, i=idx: self._nav_hover(i, True))
+            w.bind("<Leave>",    lambda _e, i=idx: self._nav_hover(i, False))
+
+    def _nav_hover(self, idx: int, entering: bool):
+        if idx == self._active_nav:
+            return
+        c  = THEME_COLORS[self._current_theme]
+        bg = c["hover"] if entering else c["panel"]
+        bar, icon_lbl, text_lbl, row = self._nav_frames[idx]
+        for w in (row, icon_lbl, text_lbl):
+            w.configure(bg=bg)
+
+    def _nav_select(self, idx: int):
+        c = THEME_COLORS[self._current_theme]
+        self._active_nav = idx
+        for i, (bar, icon_lbl, text_lbl, row) in enumerate(self._nav_frames):
+            if i == idx:
+                for w in (row, icon_lbl, text_lbl): w.configure(bg=c["hover"])
+                bar.configure(bg=c["accent"])
+                text_lbl.configure(font=(*FONTS["body"], "bold"), fg=c["text"])
+                icon_lbl.configure(fg=c["accent"])
+            else:
+                for w in (row, bar, icon_lbl, text_lbl): w.configure(bg=c["panel"])
+                text_lbl.configure(font=FONTS["body"], fg=c["text"])
+                icon_lbl.configure(fg=c["text_dim"])
+        for i, p in enumerate(self._panels):
+            if i == idx:
+                p.pack(fill=tk.BOTH, expand=True)
+            else:
+                p.pack_forget()
+        self.unbind_all("<MouseWheel>")
+        if idx == 1:
+            pid = self._selected_pid()
+            self._users_title.set(PLATFORMS[pid]["label"])
+            self._entry_hint.set(self._entry_hint_text(pid))
+            self._load_users_for(pid)
+            self.bind_all("<MouseWheel>",
+                lambda e: self._users_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        elif idx == 2:
+            self.bind_all("<MouseWheel>",
+                lambda e: self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+    def _refresh_chrome_theme(self):
+        """Re-apply JetBrains palette to all chrome (non-ttk) widgets."""
+        c = THEME_COLORS[self._current_theme]
+        self._toolbar_sep.configure(bg=c["border"])
+        self._statusbar.configure(bg=c["panel"])
+        self._statusbar_sep.configure(bg=c["border"])
+        self._status_lbl.configure(bg=c["panel"], fg=c["text_dim"])
+        self._main.configure(bg=c["bg"])
+        self._sidebar.configure(bg=c["panel"])
+        self._sidebar_sep.configure(bg=c["border"])
+        self._content.configure(bg=c["bg"])
+        for p in self._panels:
+            p.configure(bg=c["bg"])
+        # Refresh sidebar top padding frame
+        for w in self._sidebar.winfo_children():
+            if isinstance(w, tk.Frame) and not any(
+                    w is row for _, _, _, row in self._nav_frames):
+                w.configure(bg=c["panel"])
+        self._nav_select(self._active_nav)
+        if self._mode_btns:
+            self._refresh_mode_btns()
 
     # ── Dashboard ──────────────────────────────────────────────────────────────
     def _build_dashboard(self, parent):
         top = ttk.Frame(parent)
-        top.pack(fill=tk.X, padx=14, pady=(12, 4))
+        top.pack(fill=tk.X, padx=18, pady=(16, 6))
 
         def _sep(row):
             ttk.Separator(row, orient=tk.VERTICAL).pack(
-                side=tk.LEFT, fill=tk.Y, padx=14, pady=3)
+                side=tk.LEFT, fill=tk.Y, padx=24, pady=3)
 
-        def _label(row, text):
-            ttk.Label(row, text=text, font=FONTS["small"],
-                      foreground="#888888").pack(side=tk.LEFT, padx=(0, 8))
+        def _label(row, key):
+            lbl = ttk.Label(row, text=self._t(key), font=FONTS["small"],
+                            foreground="#888888")
+            lbl.pack(side=tk.LEFT, padx=(0, 14))
+            self._reg(lbl, key)
 
         # ── Row 1: Platform  ·  Mode ───────────────────────────────────────────
         row1 = ttk.Frame(top)
         row1.pack(fill=tk.X, pady=(0, 6))
 
-        _label(row1, "Platform")
+        _label(row1, "label.platform")
         for pid in self._platform_ids:
             self._build_platform_pill(row1, pid)
         self._refresh_pills()
 
         _sep(row1)
 
-        _label(row1, "Mode")
+        _label(row1, "label.mode")
         self.mode_var = tk.StringVar(value="update")
-        for val, lbl in [("update", "Update"), ("full", "Full")]:
-            btn = ttk.Button(row1, text=lbl,
-                             command=lambda v=val: self._set_mode(v))
+        for val in ("update", "full"):
+            btn = tk.Label(row1, text=self._t(f"mode.{val}"), font=FONTS["body"],
+                           cursor="hand2", padx=8, pady=3,
+                           relief=tk.FLAT, bd=0, highlightthickness=1)
             btn.pack(side=tk.LEFT, padx=(0, 2))
+            btn.bind("<Button-1>", lambda _e, v=val: self._set_mode(v))
             self._mode_btns[val] = btn
         self._refresh_mode_btns()
 
@@ -277,54 +590,51 @@ class App(tk.Tk):
         # Recent N days (full mode only) — wrapped in a frame for easy show/hide
         self._from_days_frame = ttk.Frame(row2)
         self._from_days_frame.pack(side=tk.LEFT)
-        ttk.Label(self._from_days_frame, text="Last", foreground="#888888",
-                  font=FONTS["small"]).pack(side=tk.LEFT, padx=(0, 4))
+        self._reg(
+            ttk.Label(self._from_days_frame, text=self._t("label.last"),
+                      foreground="#888888", font=FONTS["small"]),
+            "label.last").pack(side=tk.LEFT, padx=(0, 4))
         self._from_days_sb = ttk.Spinbox(self._from_days_frame,
                                          textvariable=self._from_days_var,
                                          from_=0, to=3650, width=4,
                                          font=FONTS["mono"])
         self._from_days_sb.pack(side=tk.LEFT)
-        ttk.Label(self._from_days_frame, text=" days  (0=all)",
-                  foreground="#888888",
-                  font=FONTS["small"]).pack(side=tk.LEFT)
+        self._reg(
+            ttk.Label(self._from_days_frame, text=self._t("label.days_all"),
+                      foreground="#888888", font=FONTS["small"]),
+            "label.days_all").pack(side=tk.LEFT)
         self._refresh_mode_btns()   # apply initial show/hide
 
         _sep(row2)
 
         # Start / Stop
-        self.start_btn = ttk.Button(row2, text="▶  Start",
+        self.start_btn = ttk.Button(row2, text=self._t("btn.start"),
                                     style="Accent.TButton", command=self.start)
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 4))
-        self.stop_btn = ttk.Button(row2, text="■  Stop",
+        self._reg(self.start_btn, "btn.start")
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 14))
+        self.stop_btn = ttk.Button(row2, text=self._t("btn.stop"),
                                    style="Danger.TButton",
                                    command=self.stop, state=tk.DISABLED)
+        self._reg(self.stop_btn, "btn.stop")
         self.stop_btn.pack(side=tk.LEFT)
 
         _sep(row2)
 
         # Utilities
-        for txt, cmd in [
-            ("Clear log",    self.clear_log),
-            ("📁 Downloads", self._open_downloads),
-            ("⬇ Post URL",  self._download_post_url),
-            ("📢 Updates",   self._open_announcements),
+        for key, cmd in [
+            ("btn.clear_log",  self.clear_log),
+            ("btn.downloads",  self._open_downloads),
+            ("btn.post_url",   self._download_post_url),
+            ("btn.updates",    self._open_announcements),
         ]:
-            ttk.Button(row2, text=txt, command=cmd).pack(
-                side=tk.LEFT, padx=(0, 4))
-
-        # Status (right-aligned)
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(row2, textvariable=self.status_var,
-                  font=(*FONTS["small"], "italic"),
-                  foreground="#888888").pack(side=tk.RIGHT, padx=(0, 2))
-
-        # ── Progress bar ───────────────────────────────────────────────────────
-        self.progress = ttk.Progressbar(top, mode="indeterminate")
-        self.progress.pack(fill=tk.X, pady=(2, 0))
+            self._reg(
+                ttk.Button(row2, text=self._t(key), command=cmd),
+                key).pack(side=tk.LEFT, padx=(0, 14))
 
         # ── Log ───────────────────────────────────────────────────────────────
-        log_f = ttk.LabelFrame(parent, text="Log", padding=4)
-        log_f.pack(fill=tk.BOTH, expand=True, padx=14, pady=(8, 10))
+        log_f = ttk.LabelFrame(parent, text=self._t("log.title"), padding=4)
+        self._reg(log_f, "log.title")
+        log_f.pack(fill=tk.BOTH, expand=True, padx=18, pady=(10, 14))
 
         c = THEME_COLORS[self._current_theme]
         self._log_widget = scrolledtext.ScrolledText(
@@ -347,16 +657,18 @@ class App(tk.Tk):
     # ── Platform pills ─────────────────────────────────────────────────────────
     def _build_platform_pill(self, parent, pid: str):
         cfg  = PLATFORMS[pid]
+        c    = THEME_COLORS[self._current_theme]
         pill = tk.Label(
             parent,
             text=f"  {cfg['label']}  ",
             font=FONTS["body"],
             cursor="hand2",
-            padx=2, pady=4,
-            relief=tk.FLAT,
-            bd=0,
+            padx=4, pady=3,
+            relief=tk.FLAT, bd=0,
+            highlightthickness=1,
+            highlightbackground=c["border"],
         )
-        pill.pack(side=tk.LEFT, padx=(0, 6))
+        pill.pack(side=tk.LEFT, padx=(0, 4))
         pill.bind("<Button-1>", lambda _e, p=pid: self._select_platform(p))
         pill.bind("<Enter>",    lambda _e, p=pid: self._pill_hover(p, True))
         pill.bind("<Leave>",    lambda _e, p=pid: self._pill_hover(p, False))
@@ -367,7 +679,7 @@ class App(tk.Tk):
             return
         c  = THEME_COLORS[self._current_theme]
         bg = c["hover"] if entering else c["pill_bg"]
-        self._platform_pills[pid].configure(bg=bg)
+        self._platform_pills[pid].configure(bg=bg, highlightbackground=c["border"])
 
     def _refresh_pills(self):
         c = THEME_COLORS[self._current_theme]
@@ -375,9 +687,10 @@ class App(tk.Tk):
             cfg      = PLATFORMS[pid]
             selected = pid == self._platform_sel.get()
             pill.configure(
-                bg=cfg["color"] if selected else c["pill_bg"],
-                fg="#000000"    if selected else "#ffffff",
+                bg=cfg["color"]  if selected else c["pill_bg"],
+                fg="#ffffff"     if selected else c["text"],
                 font=(*FONTS["body"], "bold") if selected else FONTS["body"],
+                highlightbackground=cfg["color"] if selected else c["border"],
             )
 
     def _select_platform(self, pid: str):
@@ -391,11 +704,15 @@ class App(tk.Tk):
         self._refresh_mode_btns()
 
     def _refresh_mode_btns(self):
+        c       = THEME_COLORS[self._current_theme]
         is_full = self.mode_var.get() == "full"
         for val, btn in self._mode_btns.items():
+            sel = val == self.mode_var.get()
             btn.configure(
-                style="Accent.TButton" if val == self.mode_var.get() else "TButton")
-        # Show "Last N days" controls only in Full mode
+                bg=c["accent"]  if sel else c["panel"],
+                fg="#ffffff"    if sel else c["text"],
+                highlightbackground=c["accent"] if sel else c["border"],
+            )
         if hasattr(self, "_from_days_frame"):
             if is_full:
                 self._from_days_frame.pack(side=tk.LEFT)
@@ -452,7 +769,8 @@ class App(tk.Tk):
                   font=FONTS["heading"]
                   ).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        inner = ttk.LabelFrame(frame, text="Users", padding=6)
+        inner = ttk.LabelFrame(frame, text=self._t("users.list"), padding=6)
+        self._reg(inner, "users.list")
         inner.grid(row=1, column=0, sticky="nsew")
         inner.rowconfigure(0, weight=1)
         inner.columnconfigure(0, weight=1)
@@ -481,8 +799,10 @@ class App(tk.Tk):
         self._users_entry = ttk.Entry(entry_f, font=FONTS["body"])
         self._users_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         self._users_entry.bind("<Return>", lambda _: self._add_user())
-        ttk.Button(entry_f, text="Add",    command=self._add_user   ).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(entry_f, text="Remove", command=self._remove_user).pack(side=tk.LEFT)
+        self._reg(ttk.Button(entry_f, text=self._t("btn.add"),    command=self._add_user),
+                  "btn.add").pack(side=tk.LEFT, padx=(0, 4))
+        self._reg(ttk.Button(entry_f, text=self._t("btn.remove"), command=self._remove_user),
+                  "btn.remove").pack(side=tk.LEFT)
 
         self._entry_hint.set(self._entry_hint_text(self._platform_ids[0]))
         ttk.Label(inner, textvariable=self._entry_hint,
@@ -514,13 +834,17 @@ class App(tk.Tk):
         idx = len(self._user_rows.get(pid, []))
 
         row = tk.Frame(self._users_inner, bg=c["list_bg"], cursor="hand2")
-        row.pack(fill=tk.X, padx=2, pady=1)
+        row.pack(fill=tk.X, pady=0)
+
+        # 3px left accent bar — mirrors the sidebar selection style
+        bar = tk.Frame(row, bg=c["list_bg"], width=3)
+        bar.pack(side=tk.LEFT, fill=tk.Y)
 
         lbl = tk.Label(row, text=display, bg=c["list_bg"], fg=c["list_fg"],
                        font=FONTS["body"], anchor="w")
-        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8), pady=4)
+        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 8), pady=5)
 
-        for w in (row, lbl):
+        for w in (row, bar, lbl):
             w.bind("<Button-1>", lambda _e, i=idx, p=pid:
                    self._select_user_row(i, p))
 
@@ -531,12 +855,13 @@ class App(tk.Tk):
         c = THEME_COLORS[self._current_theme]
         for i, row in enumerate(self._user_rows.get(pid, [])):
             sel = i == idx
-            bg  = c["list_sel"] if sel else c["list_bg"]
-            fg  = "#ffffff"     if sel else c["list_fg"]
+            bg  = c["hover"] if sel else c["list_bg"]
             row.configure(bg=bg)
             for w in row.winfo_children():
-                if isinstance(w, tk.Label):
-                    w.configure(bg=bg, fg=fg)
+                if isinstance(w, tk.Frame):   # accent bar
+                    w.configure(bg=c["accent"] if sel else c["list_bg"])
+                elif isinstance(w, tk.Label):
+                    w.configure(bg=bg, fg=c["list_fg"])
 
     def _refresh_user_rows_theme(self):
         if self._users_canvas is None:
@@ -547,12 +872,13 @@ class App(tk.Tk):
         self._users_inner.configure(bg=c["list_bg"])
         for i, row in enumerate(self._user_rows.get(pid, [])):
             sel = i == self._sel_row
-            bg  = c["list_sel"] if sel else c["list_bg"]
-            fg  = "#ffffff"     if sel else c["list_fg"]
+            bg  = c["hover"] if sel else c["list_bg"]
             row.configure(bg=bg)
             for w in row.winfo_children():
-                if isinstance(w, tk.Label):
-                    w.configure(bg=bg, fg=fg)
+                if isinstance(w, tk.Frame):
+                    w.configure(bg=c["accent"] if sel else c["list_bg"])
+                elif isinstance(w, tk.Label):
+                    w.configure(bg=bg, fg=c["list_fg"])
 
     def _add_user(self):
         pid = self._selected_pid()
@@ -724,7 +1050,7 @@ class App(tk.Tk):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._settings_canvas = canvas
 
-        outer = ttk.Frame(canvas, padding=(20, 14))
+        outer = ttk.Frame(canvas, padding=(24, 18))
         win   = canvas.create_window((0, 0), window=outer, anchor="nw")
 
         def _on_resize(e):
@@ -735,38 +1061,48 @@ class App(tk.Tk):
             canvas.configure(scrollregion=canvas.bbox("all"))
         outer.bind("<Configure>", _on_frame_resize)
 
+        self._reg(
+            ttk.Label(outer, text=self._t("settings.auth_hint"),
+                      font=FONTS["small"], foreground="#888888"),
+            "settings.auth_hint"
+        ).pack(anchor="w", pady=(0, 10))
+
         for pid, cfg in PLATFORMS.items():
-            af = ttk.LabelFrame(outer, text=f"Authentication  —  {cfg['label']}", padding=10)
+            af = ttk.LabelFrame(outer, text=f"Authentication  —  {cfg['label']}", padding=14)
             af.pack(fill=tk.X, pady=(0, 10))
             self._build_auth_section(af, pid, cfg)
 
-        def _options_section(title, rows):
-            f = ttk.LabelFrame(outer, text=title, padding=10)
+        def _options_section(title_key, rows):
+            f = ttk.LabelFrame(outer, text=self._t(title_key), padding=14)
+            self._reg(f, title_key)
             f.pack(fill=tk.X, pady=(0, 10))
-            for r, (label, attr, default, lo, hi) in enumerate(rows):
-                ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", padx=4, pady=6)
-                sp = ttk.Spinbox(f, from_=lo, to=hi, increment=1, width=10)
-                sp.set(default)
-                sp.grid(row=r, column=1, sticky="w", padx=12, pady=6)
+            for r, (label_key, attr, default, lo, hi) in enumerate(rows):
+                lbl = ttk.Label(f, text=self._t(label_key))
+                self._reg(lbl, label_key)
+                lbl.grid(row=r, column=0, sticky="w", padx=6, pady=8)
+                saved = self._load_setting(attr, default)
+                sp = ttk.Spinbox(f, from_=lo, to=hi, increment=1, width=12, font=FONTS["body"])
+                sp.set(saved)
+                sp.grid(row=r, column=1, sticky="w", padx=14, pady=8)
+                sp.bind("<<Increment>>", lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
+                sp.bind("<<Decrement>>", lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
+                sp.bind("<FocusOut>",    lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
                 setattr(self, attr, sp)
 
-        _options_section("X (Twitter) — Download Options", [
-            ("Sleep between requests (s):", "sleep_req",  2, 0, 30),
-            ("Sleep between users (s):",    "sleep_user", 5, 0, 60),
-        ])
-        _options_section("Douyin — Download Options", [
-            ("Parallel workers:",           "douyin_workers", 3, 1, 10),
+        _options_section("settings.parallel_opts", [
+            ("settings.workers", "parallel_workers", 1, 1, 10),
         ])
 
         # ── Download location ──────────────────────────────────────────────────
-        dlf = ttk.LabelFrame(outer, text="Download Location", padding=10)
+        dlf = ttk.LabelFrame(outer, text=self._t("settings.dl_location"), padding=14)
+        self._reg(dlf, "settings.dl_location")
         dlf.pack(fill=tk.X, pady=(0, 10))
 
         path_row = ttk.Frame(dlf)
         path_row.pack(fill=tk.X)
 
         self._dl_path_var = tk.StringVar(value=str(self._get_download_dir()))
-        ttk.Entry(path_row, textvariable=self._dl_path_var).pack(
+        ttk.Entry(path_row, textvariable=self._dl_path_var, font=FONTS["body"]).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
 
         def _browse_dl():
@@ -779,14 +1115,72 @@ class App(tk.Tk):
                 Path(DOWNLOAD_PATH_FILE).parent.mkdir(parents=True, exist_ok=True)
                 Path(DOWNLOAD_PATH_FILE).write_text(folder, encoding="utf-8")
 
-        ttk.Button(path_row, text="Browse…", command=_browse_dl).pack(side=tk.LEFT)
+        self._reg(ttk.Button(path_row, text=self._t("btn.browse"), command=_browse_dl),
+                  "btn.browse").pack(side=tk.LEFT)
 
-        dbf = ttk.LabelFrame(outer, text="Database", padding=10)
+        # ── Appearance ────────────────────────────────────────────────────────
+        apf = ttk.LabelFrame(outer, text=self._t("settings.appearance"), padding=14)
+        self._reg(apf, "settings.appearance")
+        apf.pack(fill=tk.X, pady=(0, 10))
+
+        self._reg(ttk.Label(apf, text=self._t("label.theme")),
+                  "label.theme").grid(row=0, column=0, sticky="w", padx=6, pady=8)
+        self._theme_toggle_btn = ttk.Button(
+            apf,
+            text=self._t("btn.switch_light") if self._current_theme == "dark"
+                 else self._t("btn.switch_dark"),
+            command=self._toggle_theme,
+        )
+        self._theme_toggle_btn.grid(row=0, column=1, sticky="w", padx=14, pady=8)
+
+        self._reg(ttk.Label(apf, text=self._t("label.language")),
+                  "label.language").grid(row=1, column=0, sticky="w", padx=6, pady=8)
+        lang_cb = ttk.Combobox(apf, state="readonly", width=12,
+                               font=FONTS["body"], values=["English", "中文"])
+        lang_cb.set("English" if self._lang == "en" else "中文")
+        lang_cb.grid(row=1, column=1, sticky="w", padx=14, pady=8)
+        lang_cb.bind("<<ComboboxSelected>>",
+                     lambda _e: self._set_lang("en" if lang_cb.get() == "English" else "zh"))
+
+        dbf = ttk.LabelFrame(outer, text=self._t("settings.database"), padding=14)
+        self._reg(dbf, "settings.database")
         dbf.pack(fill=tk.X)
-        ttk.Label(dbf, text="Delete all download archive records (forces re-download).",
-                  font=FONTS["small"], foreground="#888888").pack(anchor="w", pady=(0, 8))
-        ttk.Button(dbf, text="Reset DB", style="Danger.TButton",
-                   command=self._reset_db).pack(anchor="w")
+        self._reg(
+            ttk.Label(dbf, text=self._t("settings.db_hint"),
+                      font=FONTS["small"], foreground="#888888"),
+            "settings.db_hint").pack(anchor="w", pady=(0, 8))
+        self._reg(ttk.Button(dbf, text=self._t("btn.reset_db"), style="Danger.TButton",
+                             command=self._reset_db),
+                  "btn.reset_db").pack(anchor="w")
+
+    def _build_about_panel(self, parent):
+        import webbrowser
+
+        parent.pack_propagate(False)
+        # Fill the whole panel with a ttk.Frame so the sv_ttk background is
+        # uniform — avoids the colour mismatch between tk.Frame and ttk widgets.
+        bg = ttk.Frame(parent)
+        bg.pack(fill=tk.BOTH, expand=True)
+
+        f = ttk.Frame(bg, padding=(40, 32))
+        f.place(relx=0.5, rely=0.38, anchor="center")
+
+        ttk.Label(f, text="Media Downloader", font=FONTS["title"]).pack()
+        ttk.Label(f, text=f"v{APP_VERSION}",
+                  font=FONTS["body"], foreground="#888888").pack(pady=(6, 4))
+
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
+
+        ttk.Label(f, text="Download media from X, Douyin, and Bilibili.",
+                  font=FONTS["body"], foreground="#888888").pack(pady=(0, 4))
+        ttk.Label(f, text="Powered by gallery-dl, yt-dlp, and f2.",
+                  font=FONTS["small"], foreground="#666666").pack(pady=(0, 24))
+
+        self._reg(
+            ttk.Button(f, text=self._t("btn.github"), style="About.TButton",
+                       command=lambda: webbrowser.open(
+                           "https://github.com/GH-Acho177/media-downloader")),
+            "btn.github").pack()
 
     def _build_auth_section(self, parent, pid, cfg):
         cookies_path = Path(cfg["cookies_file"])
@@ -814,20 +1208,6 @@ class App(tk.Tk):
             else:
                 var.set(f"✗  {p.name} not found")
                 status_lbl.configure(fg="#ff6b6b")
-
-        instructions = {
-            "x":        "Log in to x.com in your browser, then export cookies with\n"
-                        "the «Get cookies.txt LOCALLY» extension → export for x.com.",
-            "douyin":   "Log in to douyin.com in your browser, then export cookies with\n"
-                        "the «Get cookies.txt LOCALLY» extension → export for douyin.com.",
-            "bilibili": "Log in to bilibili.com in your browser, then export cookies with\n"
-                        "the «Get cookies.txt LOCALLY» extension → export for bilibili.com.",
-        }
-        tk.Label(parent,
-                 text=instructions.get(pid, "Export cookies from your browser as a Netscape .txt file."),
-                 font=FONTS["small"], fg="#aaaaaa",
-                 bg=parent.winfo_toplevel().cget("bg"),
-                 justify=tk.LEFT).pack(anchor="w", pady=(0, 8))
 
         btn_row = ttk.Frame(parent)
         btn_row.pack(anchor="w")
@@ -906,19 +1286,20 @@ class App(tk.Tk):
         dlg.title("Download Post URL")
         dlg.resizable(False, False)
         dlg.grab_set()
-        self._centre_dialog(dlg, 480, 150)
+        self._centre_dialog(dlg, 680, 230)
 
         ttk.Label(dlg, text=f"Platform: {cfg['label']}",
                   font=FONTS["heading"]).grid(
-            row=0, column=0, columnspan=2, padx=14, pady=(12, 6), sticky="w")
-        ttk.Label(dlg, text="Post URL:").grid(row=1, column=0, padx=14, pady=4, sticky="w")
+            row=0, column=0, columnspan=2, padx=20, pady=(18, 8), sticky="w")
+        ttk.Label(dlg, text="Post URL:").grid(row=1, column=0, padx=20, pady=6, sticky="w")
         url_var   = tk.StringVar()
-        url_entry = ttk.Entry(dlg, textvariable=url_var, width=52, font=FONTS["body"])
-        url_entry.grid(row=1, column=1, padx=(0, 14), pady=4)
+        url_entry = ttk.Entry(dlg, textvariable=url_var, width=62, font=FONTS["body"])
+        url_entry.grid(row=1, column=1, padx=(0, 20), pady=6, sticky="ew")
+        dlg.columnconfigure(1, weight=1)
         url_entry.focus_set()
 
         btn_row = ttk.Frame(dlg)
-        btn_row.grid(row=2, column=0, columnspan=2, pady=(8, 14))
+        btn_row.grid(row=2, column=0, columnspan=2, pady=(12, 18))
 
         def start():
             url = url_var.get().strip()
@@ -957,16 +1338,18 @@ class App(tk.Tk):
                 cfg    = PLATFORMS[pid]
                 outdir = str(self._get_download_dir() / "url")
                 Path(outdir).mkdir(parents=True, exist_ok=True)
-                print(f"Post URL : {url}\n")
+                # Ensure URL has a scheme
+                _url = url if url.startswith(("http://", "https://")) else "https://" + url
+                print(f"Post URL : {_url}\n")
 
                 if pid == "douyin" or cfg.get("downloader") == "f2":
                     from urllib.parse import urlparse, parse_qs
                     import re as _re
-                    _qs = parse_qs(urlparse(url).query)
+                    _qs = parse_qs(urlparse(_url).query)
                     if "modal_id" in _qs:
                         aweme_id = _qs["modal_id"][0]
                     else:
-                        _m = _re.search(r"/video/(\d+)", url)
+                        _m = _re.search(r"/video/(\d+)", _url)
                         if not _m:
                             print("[ERROR] Cannot extract video ID from URL.")
                             return
@@ -983,12 +1366,28 @@ class App(tk.Tk):
                         aweme_id, cookie_str, dl_outdir,
                         "{nickname}_{create}_{aweme_id}",
                     ))
+                elif cfg.get("downloader") == "yt-dlp":
+                    cmd = [
+                        "yt-dlp",
+                        "--cookies", cfg["cookies_file"],
+                        "-o", "%(id)s_%(title)s.%(ext)s",
+                        "-P", outdir,
+                        _url,
+                    ]
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace",
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    for line in self._proc.stdout:
+                        print(line, end="")
+                    self._proc.wait()
                 else:
                     cmd = [
                         GDL,
                         "--cookies", cfg["cookies_file"],
                         "-D", outdir,
-                        url,
+                        _url,
                     ]
                     self._proc = subprocess.Popen(
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1062,14 +1461,17 @@ class App(tk.Tk):
         self.progress.start(12)
         self.status_var.set("Running…")
 
+        workers = int(self.parallel_workers.get())
+
         threading.Thread(
             target=self._worker,
             args=(pid,
                   self.mode_var.get() == "full",
-                  int(self.sleep_req.get()),
-                  int(self.sleep_user.get()),
+                  2,  # sleep_req — gallery-dl default
+                  5,  # sleep_user — gallery-dl default
                   selected,
-                  from_date),
+                  from_date,
+                  workers),
             daemon=True,
         ).start()
 
@@ -1084,36 +1486,39 @@ class App(tk.Tk):
         dlg.transient(self)
         dlg.grab_set()
 
-        self._centre_dialog(dlg, 360, min(40 * len(all_users) + 180, 560))
+        self._centre_dialog(dlg, 900, min(72 * len(all_users) + 300, 1000))
 
-        outer = ttk.Frame(dlg, padding=16)
+        outer = ttk.Frame(dlg, padding=24)
         outer.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(outer, text=cfg["label"], font=FONTS["heading"]).pack(
-            anchor=tk.W, pady=(0, 2))
+            anchor=tk.W, pady=(0, 4))
         ttk.Label(outer, text="Choose accounts for this run:",
                   font=FONTS["small"], foreground="#888888").pack(
-            anchor=tk.W, pady=(0, 10))
+            anchor=tk.W, pady=(0, 14))
 
-        # Scrollable checkbox list
-        list_frame = tk.Frame(outer, bg=c["list_bg"],
+        # Scrollable checkbox list — use theme background so ttk.Checkbutton blends in
+        _list_bg = str(ttk.Style().lookup("TFrame", "background")) or c["bg"]
+
+        list_frame = tk.Frame(outer, bg=_list_bg,
                               highlightthickness=1,
-                              highlightbackground="#444444")
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                              highlightbackground=c["border"])
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
 
-        canvas = tk.Canvas(list_frame, bg=c["list_bg"],
-                           highlightthickness=0, width=320,
-                           height=min(40 * len(all_users), 320))
+        canvas = tk.Canvas(list_frame, bg=_list_bg,
+                           highlightthickness=0, width=750,
+                           height=min(64 * len(all_users), 620))
         sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        inner = tk.Frame(canvas, bg=c["list_bg"])
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner = tk.Frame(canvas, bg=_list_bg)
+        _win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>",
-                   lambda _e: canvas.configure(
-                       scrollregion=canvas.bbox("all")))
+                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(_win_id, width=e.width))
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -1121,35 +1526,78 @@ class App(tk.Tk):
         inner.bind_all("<MouseWheel>", _on_mousewheel)
         dlg.bind("<Destroy>", lambda _e: inner.unbind_all("<MouseWheel>"))
 
+        _accent = c["accent"]
+        _hover  = c["hover"]
+        _fg     = c["text"]
+
         vars_ = []
-        for i, user in enumerate(all_users):
+        for user in all_users:
             v    = tk.BooleanVar(value=False)
             name = user.split("|")[0]
-            cb   = tk.Checkbutton(inner, text=f"  {name}", variable=v,
-                                  bg=c["list_bg"], fg=c["list_fg"],
-                                  activebackground=c["list_bg"],
-                                  activeforeground=c["list_fg"],
-                                  selectcolor=c["list_bg"],
-                                  font=FONTS["body"],
-                                  anchor=tk.W, padx=6, pady=4)
-            cb.pack(fill=tk.X)
-            vars_.append((v, user))
+
+            row = tk.Frame(inner, bg=_list_bg, cursor="hand2")
+            row.pack(fill=tk.X)
+
+            # Accent bar on left — visible when selected
+            bar = tk.Frame(row, bg=_list_bg, width=4)
+            bar.pack(side=tk.LEFT, fill=tk.Y)
+
+            lbl = tk.Label(row, text=name, font=FONTS["small"],
+                           bg=_list_bg, fg=_fg, anchor="w")
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=14, pady=11)
+
+            # Check mark on right — visible when selected
+            chk = tk.Label(row, text="", font=FONTS["body"],
+                           bg=_list_bg, fg=_accent, width=2, anchor="center")
+            chk.pack(side=tk.RIGHT, padx=12, pady=11)
+
+            def _toggle(_e, _v=v, _bar=bar, _chk=chk):
+                _v.set(not _v.get())
+                if _v.get():
+                    _bar.configure(bg=_accent)
+                    _chk.configure(text="✓")
+                else:
+                    _bar.configure(bg=str(_bar.master.cget("bg")))
+                    _chk.configure(text="")
+
+            def _enter(_e, _row=row, _bar=bar, _lbl=lbl, _chk=chk, _v=v):
+                for w in (_row, _lbl, _chk): w.configure(bg=_hover)
+                if not _v.get(): _bar.configure(bg=_hover)
+
+            def _leave(_e, _row=row, _bar=bar, _lbl=lbl, _chk=chk, _v=v):
+                for w in (_row, _lbl, _chk): w.configure(bg=_list_bg)
+                if not _v.get(): _bar.configure(bg=_list_bg)
+
+            for w in (row, lbl, chk):
+                w.bind("<Button-1>", _toggle)
+                w.bind("<Enter>",    _enter)
+                w.bind("<Leave>",    _leave)
+
+            vars_.append((v, user, bar, chk))
+
+        def _set_all(checked: bool):
+            for _v, _, _bar, _chk in vars_:
+                _v.set(checked)
+                if checked:
+                    _bar.configure(bg=_accent)
+                    _chk.configure(text="✓")
+                else:
+                    _bar.configure(bg=_list_bg)
+                    _chk.configure(text="")
 
         # Select all / clear
         sel_row = ttk.Frame(outer)
         sel_row.pack(fill=tk.X, pady=(0, 12))
         ttk.Button(sel_row, text="All",
-                   command=lambda: [v.set(True)  for v, _ in vars_]).pack(
-            side=tk.LEFT, padx=(0, 4))
+                   command=lambda: _set_all(True)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(sel_row, text="None",
-                   command=lambda: [v.set(False) for v, _ in vars_]).pack(
-            side=tk.LEFT)
+                   command=lambda: _set_all(False)).pack(side=tk.LEFT)
 
         # Result container
         result: list = []
 
         def _confirm():
-            chosen = [u for v, u in vars_ if v.get()]
+            chosen = [u for v, u, *_ in vars_ if v.get()]
             if not chosen:
                 messagebox.showwarning("No accounts selected",
                                        "Select at least one account.",
@@ -1222,7 +1670,7 @@ class App(tk.Tk):
 
     # ── Worker ─────────────────────────────────────────────────────────────────
     def _worker(self, pid: str, is_full: bool, sleep_req: int, sleep_user: int,
-                users_override: list | None = None, from_date: str = ""):
+                users_override: list | None = None, from_date: str = "", workers: int = 1):
         import time
         _run_start = time.time()
         _run_key   = str(int(_run_start * 1000))
@@ -1422,7 +1870,7 @@ class App(tk.Tk):
                         "folder":  str(_user_dl_folder),
                     }, False, user
 
-                with ThreadPoolExecutor(max_workers=int(self.douyin_workers.get())) as pool:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
                     futures = {pool.submit(_f2_task, u, i): u
                                for i, u in enumerate(users)}
                     for fut in as_completed(futures):
@@ -1437,27 +1885,26 @@ class App(tk.Tk):
                             _update_results.append(result)
 
             elif downloader == "yt-dlp":
-                # ── Sequential yt-dlp ─────────────────────────────────────────
-                for i, user in enumerate(users):
-                    if self.stop_flag.is_set():
-                        break
+                # ── yt-dlp (parallel when workers > 1) ───────────────────────
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                dateafter = from_date.replace("-", "") if from_date else None
 
+                def _ytdlp_task(user, idx):
+                    if self.stop_flag.is_set():
+                        return None, False, user
                     display      = user.split("|")[0]
                     safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
+                    tag          = f"[{display}]" if workers > 1 else ""
+                    prefix       = f"  {tag} " if tag else "  "
                     print(f"\n{'─'*50}")
-                    print(f"[{i+1}/{len(users)}] {display}")
+                    print(f"[{idx+1}/{len(users)}] {display}")
                     print(f"{'─'*50}")
-
                     url          = cfg["url_fn"](user)
                     archive_file = str(Path("config") / f"{pid}_downloaded.txt")
                     user_dir     = base_dir / safe_display
                     user_dir.mkdir(parents=True, exist_ok=True)
                     _before      = set(user_dir.glob("*"))
-                    print(f"  Save to  : {user_dir}")
-
-                    # from_date is ISO "YYYY-MM-DD"; yt-dlp needs "YYYYMMDD"
-                    dateafter = from_date.replace("-", "") if from_date else None
-
+                    print(f"{prefix}Save to  : {user_dir}")
                     cmd = [
                         "yt-dlp",
                         "--cookies", cookies_file,
@@ -1468,43 +1915,42 @@ class App(tk.Tk):
                         "-P", str(user_dir),
                         url,
                     ]
-                    self._proc = subprocess.Popen(
+                    proc = subprocess.Popen(
                         cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=subprocess.CREATE_NO_WINDOW,
                     )
+                    if workers == 1:
+                        self._proc = proc
+                    with self._procs_lock:
+                        self._procs.append(proc)
                     user_suspended       = False
                     _completed_posts: list[str] = []
-                    for line in self._proc.stdout:
-                        print(line, end="")
-                        if "ERROR" in line and any(k in line for k in (
-                                "not found", "unavailable", "suspended", "deleted")):
-                            user_suspended = True
-                        # Post-wise: detect each fully merged video
-                        if '[Merger] Merging formats into "' in line:
-                            _fname = line.split('"')[1] if '"' in line else ""
-                            if _fname:
-                                _completed_posts.append(Path(_fname).name)
-                                _upsert_run(_build_run(extra_user={
-                                    "display": display,
-                                    "count":   len(_completed_posts),
-                                    "corrupt": 0,
-                                    "files":   list(_completed_posts),
-                                    "folder":  str(user_dir.resolve()),
-                                }))
-                        if self.stop_flag.is_set():
-                            self._proc.terminate()
-                            break
-                    self._proc.wait()
+                    try:
+                        for line in proc.stdout:
+                            print(f"{prefix}{line}", end="")
+                            if "ERROR" in line and any(k in line for k in (
+                                    "not found", "unavailable", "suspended", "deleted")):
+                                user_suspended = True
+                            if '[Merger] Merging formats into "' in line:
+                                _fname = line.split('"')[1] if '"' in line else ""
+                                if _fname:
+                                    _completed_posts.append(Path(_fname).name)
+                            if self.stop_flag.is_set():
+                                proc.terminate()
+                                break
+                        proc.wait()
+                    finally:
+                        with self._procs_lock:
+                            if proc in self._procs:
+                                self._procs.remove(proc)
 
-                    # Use merger-tracked list; fall back to fs diff for single-format
                     _user_dl_folder = user_dir.resolve()
                     if _completed_posts:
                         new_names = _completed_posts
                         new_count = len(new_names)
                     else:
-                        # Filter out yt-dlp temp files (.fNNNNN.ext)
                         _after     = set(user_dir.glob("*")) if user_dir.exists() else set()
                         _new_files = {f for f in (_after - _before)
                                       if not _re.search(r'\.f\d+\.[a-z0-9]+$',
@@ -1517,30 +1963,40 @@ class App(tk.Tk):
                     if corrupt:
                         corrupt_count = len(corrupt)
                         for f in corrupt:
-                            print(f"  ⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
+                            print(f"{prefix}⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
                             f.unlink(missing_ok=True)
                         hint = "will re-download now" if is_full else "run Full mode to re-download"
-                        print(f"  → {corrupt_count} corrupt file(s) removed ({hint})")
+                        print(f"{prefix}→ {corrupt_count} corrupt file(s) removed ({hint})")
                         new_count = max(0, new_count - corrupt_count)
 
                     if user_suspended:
-                        suspended.append(user)
-                        print(f"  ⚠ {display} appears suspended/deleted — will be removed")
-                    else:
-                        _update_results.append({
-                            "display": display,
-                            "count":   new_count,
-                            "corrupt": corrupt_count,
-                            "files":   new_names,
-                            "folder":  str(_user_dl_folder),
-                        })
+                        print(f"{prefix}⚠ {display} appears suspended/deleted — will be removed")
+                        return None, True, user
 
-                    if not self.stop_flag.is_set() and i < len(users) - 1:
-                        print(f"\nWaiting {sleep_user}s…")
-                        time.sleep(sleep_user)
+                    return {
+                        "display": display,
+                        "count":   new_count,
+                        "corrupt": corrupt_count,
+                        "files":   new_names,
+                        "folder":  str(_user_dl_folder),
+                    }, False, user
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = {pool.submit(_ytdlp_task, u, i): u
+                            for i, u in enumerate(users)}
+                    for i, fut in enumerate(as_completed(futs)):
+                        result, is_susp, user = fut.result()
+                        if is_susp:
+                            suspended.append(user)
+                        elif result:
+                            _update_results.append(result)
+                            _upsert_run(_build_run())
+                        if workers == 1 and not self.stop_flag.is_set() and i < len(users) - 1:
+                            print(f"\nWaiting {sleep_user}s…")
+                            time.sleep(sleep_user)
 
             else:
-                # ── Sequential gallery-dl ─────────────────────────────────────
+                # ── Sequential gallery-dl (X / Twitter) ──────────────────────
                 for i, user in enumerate(users):
                     if self.stop_flag.is_set():
                         break
@@ -1586,10 +2042,10 @@ class App(tk.Tk):
                             break
                     self._proc.wait()
 
-                    _gdl_after      = set(user_dir.glob("*")) if user_dir.exists() else set()
-                    _new_files      = _gdl_after - _gdl_before
-                    new_count       = len(_new_files)
-                    new_names       = [f.name for f in _new_files]
+                    _gdl_after  = set(user_dir.glob("*")) if user_dir.exists() else set()
+                    _new_files  = _gdl_after - _gdl_before
+                    new_count   = len(_new_files)
+                    new_names   = [f.name for f in _new_files]
                     _user_dl_folder = user_dir.resolve()
 
                     corrupt = self._scan_corrupt(_user_dl_folder)
@@ -1686,7 +2142,7 @@ class App(tk.Tk):
         dlg.transient(self)
         dlg.grab_set()
 
-        self._centre_dialog(dlg, 540, 460)
+        self._centre_dialog(dlg, 980, 800)
 
         BG      = "#1e1e1e"
         BG_HDR  = "#252525"
@@ -1738,7 +2194,9 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        for run in runs:
+        PAGE = 10
+
+        def _render_card(run):
             date     = run.get("date", "")
             time_    = run.get("time", "")
             duration = run.get("duration", "")
@@ -1750,12 +2208,10 @@ class App(tk.Tk):
             total    = sum(u.get("count", 0) for u in users)
             total_corrupt = sum(u.get("corrupt", 0) for u in users)
 
-            # ── Card ──────────────────────────────────────────────────────────
             card = tk.Frame(inner, bg=BG, highlightthickness=1,
                             highlightbackground=SEP)
             card.pack(fill=tk.X, padx=8, pady=(8, 0))
 
-            # Header band
             hdr = tk.Frame(card, bg=BG_HDR)
             hdr.pack(fill=tk.X)
 
@@ -1766,7 +2222,6 @@ class App(tk.Tk):
                      bg=BG_HDR, fg=FG_DATE,
                      font=FONTS["small"]).pack(side=tk.LEFT, pady=5)
 
-            # Delete button (left of tags)
             del_btn = tk.Label(hdr, text=" ✕ ", bg=BG_HDR, fg="#666666",
                                font=FONTS["small"], cursor="hand2")
             del_btn.pack(side=tk.RIGHT, padx=(0, 4), pady=4)
@@ -1777,7 +2232,6 @@ class App(tk.Tk):
             tags = tk.Frame(hdr, bg=BG_HDR)
             tags.pack(side=tk.RIGHT, padx=8, pady=4)
 
-            # Platform tag — use platform color as background, black text
             if platform:
                 p_color = PLATFORMS.get(pid_key, {}).get("color", "#2d2d2d")
                 tk.Label(tags, text=f" {platform} ", bg=p_color, fg="#000000",
@@ -1796,10 +2250,8 @@ class App(tk.Tk):
                      font=(*FONTS["small"], "bold")).pack(side=tk.LEFT, padx=2)
             if total_corrupt:
                 tk.Label(tags, text=f" ⚠{total_corrupt} ", bg="#2d2d2d",
-                         fg="#e8a030", font=FONTS["small"]).pack(
-                    side=tk.LEFT, padx=2)
+                         fg="#e8a030", font=FONTS["small"]).pack(side=tk.LEFT, padx=2)
 
-            # User rows
             body = tk.Frame(card, bg=BG)
             body.pack(fill=tk.X, padx=0, pady=(2, 4))
 
@@ -1842,7 +2294,6 @@ class App(tk.Tk):
                         f"  ▶ {n} file{'s' if n != 1 else ''}"
                     )
                     files_frame = tk.Frame(body, bg=BG)
-
                     shown      = [False]
                     built      = [False]
                     toggle_lbl = tk.Label(row, text=label_text(False),
@@ -1872,11 +2323,38 @@ class App(tk.Tk):
                         _make_toggle(files_frame, toggle_lbl,
                                      label_text, shown, built, row, files))
 
-        # Spacer at bottom so last card isn't flush against Close button
-        tk.Frame(inner, bg=BG, height=8).pack()
+        # ── Paginated rendering ────────────────────────────────────────────────
+        offset = [0]
+        more_btn_frame = [None]
 
-        ttk.Button(outer, text="Close", command=dlg.destroy,
-                   style="Accent.TButton").pack(pady=(8, 0))
+        def _render_next():
+            start = offset[0]
+            batch = runs[start:start + PAGE]
+            for run in batch:
+                _render_card(run)
+            offset[0] += len(batch)
+
+            # Remove old "Show more" button if present
+            if more_btn_frame[0]:
+                more_btn_frame[0].destroy()
+                more_btn_frame[0] = None
+
+            remaining = len(runs) - offset[0]
+            if remaining > 0:
+                f = tk.Frame(inner, bg=BG)
+                f.pack(fill=tk.X, pady=(12, 0))
+                lbl = tk.Label(
+                    f,
+                    text=f"Show {min(PAGE, remaining)} more  ({remaining} remaining) ▼",
+                    bg=BG, fg=ACCENT, font=FONTS["small"], cursor="hand2",
+                )
+                lbl.pack()
+                lbl.bind("<Button-1>", lambda _e: _render_next())
+                more_btn_frame[0] = f
+
+            tk.Frame(inner, bg=BG, height=8).pack()
+
+        _render_next()
 
         dlg.deiconify()
 

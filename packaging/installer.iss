@@ -32,7 +32,7 @@ PrivilegesRequired=lowest
 ; Appearance
 WizardStyle=modern
 ; Icon (comment out if you have no icon.ico yet)
-SetupIconFile=..\icon.ico
+SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 ; Misc
 ShowLanguageDialog=no
