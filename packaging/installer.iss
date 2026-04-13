@@ -3,7 +3,7 @@
 ; Compile:  Right-click this file → Compile  (or open in Inno Setup IDE)
 
 #define AppName      "Media Downloader"
-#define AppVersion   "1.0.0"
+#define AppVersion   "2.1.2"
 #define AppPublisher "GH-Acho177"
 #define AppExeName   "MediaDownloader.exe"
 ; Install into user's AppData so no UAC prompt is needed

@@ -1,6 +1,7 @@
 # ── Build output ──────────────────────────────────────────────────────────────
 dist/
 build/
+build.bat
 
 # ── Downloaded binaries (users download these separately) ─────────────────────
 packaging/gallery-dl.exe
