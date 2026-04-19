@@ -11,6 +11,7 @@ Current version: **3.0.0** — [Download installer](https://github.com/GH-Acho17
 - Batch download from multiple accounts across all three platforms
 - **Update mode** — fetch only new posts since the last run
 - **Full mode** — download everything, with optional day-range limit
+- **Auto mode** — scheduled background sync at a configurable interval (default 30 min); toggle from the dashboard, persists across restarts; suppresses history and popups when nothing new was downloaded
 - Single video/post download by pasting a URL directly
 - Parallel downloads across platforms and configurable worker count
 - Organises downloads by creator: `downloads/{Creator}/{account}/`
