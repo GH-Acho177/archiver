@@ -200,6 +200,7 @@ class App(tk.Tk):
         self._mode_btns:    dict[str, tk.Label] = {}
         self._from_days_var = tk.StringVar(value="0")
         self._from_days_sb: ttk.Spinbox | None = None
+        self._theme_anim_id: "str | None" = None
 
         # Creator tab state
         self._creators_canvas: tk.Canvas | None        = None
@@ -218,7 +219,7 @@ class App(tk.Tk):
         self._drag_active_hdr: "tk.Frame | None"   = None
         self._drag_hdr_colors: dict                = {}  # hdr_frame -> saved bg
 
-        self._log_widget: scrolledtext.ScrolledText | None = None
+        self._log_widget: tk.Text | None = None
 
         # Scheduler state
         self._scheduler_stop:   threading.Event         = threading.Event()
@@ -241,6 +242,7 @@ class App(tk.Tk):
         self._tray_icon: "pystray.Icon | None" = None
         self._setup_tray()
         self.deiconify()            # show now that layout is complete
+        self._apply_titlebar_theme()
 
     # ── System tray ────────────────────────────────────────────────────────────
     def _setup_tray(self):
@@ -418,6 +420,9 @@ class App(tk.Tk):
         rx, ry = self.winfo_rootx(), self.winfo_rooty()
         rw, rh = self.winfo_width(), self.winfo_height()
         dlg.geometry(f"{w}x{h}+{rx + (rw - w)//2}+{ry + (rh - h)//2}")
+        _ico = _MEIPASS / "assets" / "icon.ico"
+        if _ico.exists():
+            dlg.iconbitmap(str(_ico))
         self.unbind_all("<MouseWheel>")
         def _restore(_e=None):
             if self._active_nav == 1 and self._creators_canvas:
@@ -519,22 +524,68 @@ class App(tk.Tk):
             pass
         self._apply_lang()
 
+    @staticmethod
+    def _lerp_hex(c1: str, c2: str, t: float) -> str:
+        r1,g1,b1 = int(c1[1:3],16),int(c1[3:5],16),int(c1[5:7],16)
+        r2,g2,b2 = int(c2[1:3],16),int(c2[3:5],16),int(c2[5:7],16)
+        return (f"#{int(r1+(r2-r1)*t):02x}"
+                f"{int(g1+(g2-g1)*t):02x}"
+                f"{int(b1+(b2-b1)*t):02x}")
+
+    def _collect_widget_targets(self, widget, mapping: dict, out: list):
+        for opt in ("background", "foreground"):
+            try:
+                val = str(widget.cget(opt)).lower()
+                if val in mapping:
+                    out.append((widget, opt, val, mapping[val]))
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._collect_widget_targets(child, mapping, out)
+
+    def _animate_theme_step(self, targets: list, frame: int, total: int):
+        t_lin = frame / total
+        t = t_lin * t_lin * (3 - 2 * t_lin)   # cubic ease-in-out
+        for widget, opt, c_old, c_new in targets:
+            try:
+                widget.configure(**{opt: self._lerp_hex(c_old, c_new, t)})
+            except tk.TclError:
+                pass
+        if frame < total:
+            self._theme_anim_id = self.after(
+                16, self._animate_theme_step, targets, frame + 1, total)
+        else:
+            self._theme_anim_id = None
+            self._refresh_chrome_theme()
+            self._refresh_creator_list_theme()
+
     def _toggle_theme(self):
+        if self._theme_anim_id:
+            self.after_cancel(self._theme_anim_id)
+            self._theme_anim_id = None
+
+        old_c = THEME_COLORS[self._current_theme]
         self._current_theme = "light" if self._current_theme == "dark" else "dark"
+        new_c = THEME_COLORS[self._current_theme]
+
+        # Collect animation targets from current widget tree before any color change
+        old_to_new = {v: new_c[k] for k, v in old_c.items()}
+        targets: list = []
+        self._collect_widget_targets(self, old_to_new, targets)
+
+        # Snap ttk widgets and non-color state immediately
         sv_ttk.set_theme(self._current_theme)
         self._patch_styles()
-        c = THEME_COLORS[self._current_theme]
-        self._refresh_creator_list_theme()
+        self._apply_titlebar_theme()
         if self._log_widget:
-            self._log_widget.configure(bg=c["log_bg_deep"], fg=c["log_fg"])
             self._configure_log_tags()
-        if hasattr(self, "_log_header_lbl"):
-            self._log_header_lbl.configure(bg=c["bg"], fg=c["text_dim"])
         if hasattr(self, '_theme_toggle_btn'):
             self._theme_toggle_btn.configure(
                 text=self._t("btn.switch_light") if self._current_theme == "dark"
                 else self._t("btn.switch_dark"))
-        self._refresh_chrome_theme()
+
+        # Animate tk widget colors
+        self._animate_theme_step(targets, 1, 20)
 
     # ── UI skeleton ────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -711,9 +762,23 @@ class App(tk.Tk):
                 self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units")
             self.bind_all("<MouseWheel>", _sett_wheel)
 
+    def _apply_titlebar_theme(self):
+        """Ask DWM to use a dark or light title bar to match the app theme."""
+        try:
+            hwnd  = _ctypes.windll.user32.GetParent(self.winfo_id())
+            if not hwnd:
+                hwnd = self.winfo_id()
+            dark  = _ctypes.c_int(1 if self._current_theme == "dark" else 0)
+            # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 10 1903+)
+            _ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, _ctypes.byref(dark), _ctypes.sizeof(dark))
+        except Exception:
+            pass
+
     def _refresh_chrome_theme(self):
         """Re-apply JetBrains palette to all chrome (non-ttk) widgets."""
         c = THEME_COLORS[self._current_theme]
+        self._apply_titlebar_theme()
         # Top bar
         self._topbar.configure(bg=c["panel"])
         self._topbar_sep.configure(bg=c["border"])
@@ -889,6 +954,7 @@ class App(tk.Tk):
         # Utilities — right-aligned, inside the countdown
         for key, cmd in [
             ("btn.downloads", self._open_downloads),
+            ("btn.post_url",  self._download_post_url),
             ("btn.clear_log", self.clear_log),
         ]:
             self._reg(
@@ -917,14 +983,18 @@ class App(tk.Tk):
         self._log_wrap = tk.Frame(self._log_area, bg=c["log_border"], bd=0)
         self._log_wrap.pack(fill=tk.BOTH, expand=True)
 
-        self._log_widget = scrolledtext.ScrolledText(
+        _log_vsb = ttk.Scrollbar(self._log_wrap, orient=tk.VERTICAL)
+        self._log_widget = tk.Text(
             self._log_wrap, state="disabled", wrap=tk.WORD,
             bg=c["log_bg_deep"], fg=c["log_fg"],
             insertbackground=c["log_fg"],
             font=FONTS["mono"], relief=tk.FLAT, borderwidth=0,
             selectbackground="#264f78",
+            yscrollcommand=_log_vsb.set,
         )
-        self._log_widget.pack(fill=tk.BOTH, expand=True)
+        _log_vsb.configure(command=self._log_widget.yview)
+        _log_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._log_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.log = self._log_widget
         self._configure_log_tags()
 
