@@ -4,7 +4,7 @@ import subprocess
 import threading
 import sys
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import shutil
 from pathlib import Path
 
@@ -45,7 +45,8 @@ from src.config import (
     DOWNLOAD_PATH_FILE, LANG_FILE, GDL, ACCENT, _MEDIA_EXTS,
     THEME_COLORS, FONTS, _LOG_TAGS, STRINGS,
 )
-from src.utils import TextRedirector, _LineWriter, _del
+from src.creator_store import CreatorStore
+from src.utils import TextRedirector, _LineWriter, _TaskBuffer, _ThreadRouter, _del
 
 try:
     import pystray
@@ -77,6 +78,87 @@ def _read_download_dir() -> Path:
     return Path("downloads")
 
 
+# Sentinel — means "cursor is not over any valid drop target"
+_DRAG_NONE = object()
+
+
+class _ThinBar:
+    """2 px accent strip; supports determinate fill and indeterminate animation."""
+
+    _BAR_W = 0.22   # indeterminate block width as fraction of total
+    _STEP  = 0.012  # fraction moved per frame
+    _FPS   = 50     # ms per frame
+
+    def __init__(self, parent, accent: str, bg: str):
+        self._accent = accent
+        self._bg     = bg
+        self.canvas  = tk.Canvas(parent, height=2, bd=0,
+                                 highlightthickness=0, bg=bg)
+        self._rect   = self.canvas.create_rectangle(0, 0, 0, 2,
+                                                    fill=accent, outline="")
+        self._anim_id: "str | None" = None
+        self._pos    = 0.0   # indeterminate head position (0–1)
+        self._value  = 0.0   # determinate value (0–100)
+        self._mode   = "determinate"
+        self.canvas.bind("<Configure>", lambda _e: self._draw())
+
+    # ── public API (mirrors ttk.Progressbar enough for our call sites) ─────────
+    def pack(self, **kw):
+        self.canvas.pack(**kw)
+
+    def configure(self, **kw):
+        if "mode" in kw:
+            self._mode = kw["mode"]
+
+    def __setitem__(self, key, val):
+        if key == "value":
+            self._value = float(val)
+            if self._mode == "determinate":
+                self._draw()
+
+    def start(self, _interval=None):
+        self._mode = "indeterminate"
+        self._pos  = 0.0
+        self._cancel()
+        self._animate()
+
+    def stop(self):
+        self._cancel()
+        self._mode  = "determinate"
+        self._value = 0.0
+        self._draw()
+
+    # ── internals ──────────────────────────────────────────────────────────────
+    def _draw(self):
+        w = self.canvas.winfo_width()
+        if w < 2:
+            return
+        if self._mode == "determinate":
+            x2 = int(w * self._value / 100)
+            self.canvas.coords(self._rect, 0, 0, x2, 2)
+        # indeterminate drawn by _animate
+
+    def _animate(self):
+        w = self.canvas.winfo_width()
+        if w < 2:
+            self._anim_id = self.canvas.after(self._FPS, self._animate)
+            return
+        bw   = self._BAR_W
+        head = self._pos
+        tail = head - bw
+        x1   = int(max(0, tail) * w)
+        x2   = int(min(1, head) * w)
+        self.canvas.coords(self._rect, x1, 0, x2, 2)
+        self._pos += self._STEP
+        if self._pos > 1 + bw:
+            self._pos = 0.0
+        self._anim_id = self.canvas.after(self._FPS, self._animate)
+
+    def _cancel(self):
+        if self._anim_id:
+            self.canvas.after_cancel(self._anim_id)
+            self._anim_id = None
+
 # ── Main application ───────────────────────────────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -88,7 +170,7 @@ class App(tk.Tk):
         _raw_dpi = self.winfo_fpixels('1i')
         self._sf: float = max(1.0, _raw_dpi / 96)   # 1.0 at 96 dpi, 1.5 at 144 dpi, etc.
         self.tk.call('tk', 'scaling', _raw_dpi / 72.0)
-        self.title(f"Media Downloader v{APP_VERSION}")
+        self.title(f"Archiver v{APP_VERSION}")
         _ico = _MEIPASS / "assets" / "icon.ico"
         if _ico.exists():
             self.iconbitmap(str(_ico))
@@ -115,33 +197,46 @@ class App(tk.Tk):
         self._procs:    list = []   # active parallel procs (f2)
         self._procs_lock = threading.Lock()
 
-        self._platform_ids:   list[str]              = list(PLATFORMS.keys())
-        self._platform_sel:   tk.StringVar            = tk.StringVar(value=self._platform_ids[0])
-        self._platform_pills: dict[str, tk.Label]     = {}
-        self._mode_btns:      dict[str, tk.Label]       = {}
+        self._mode_btns:    dict[str, tk.Label] = {}
         self._from_days_var = tk.StringVar(value="0")
         self._from_days_sb: ttk.Spinbox | None = None
 
-        # Users tab state
-        self._users_title:  tk.StringVar              = tk.StringVar()
-        self._entry_hint:   tk.StringVar              = tk.StringVar()
-        self._user_raw:     dict[str, list[str]]       = {}
-        self._user_rows:    dict[str, list[tk.Frame]]  = {}
-        self._sel_row:      int | None                 = None
-        self._users_canvas:    tk.Canvas                = None   # type: ignore
-        self._settings_canvas: tk.Canvas               = None   # type: ignore
-        self._users_inner:  tk.Frame                   = None   # type: ignore
-        self._canvas_win:   int                        = 0
-        self._cookie_status: dict[str, tk.StringVar]  = {}
+        # Creator tab state
+        self._creators_canvas: tk.Canvas | None        = None
+        self._creators_inner:  tk.Frame | None         = None
+        self._creators_win:    int                     = 0
+        self._settings_canvas: tk.Canvas | None        = None
+        self._cookie_status:   dict[str, tk.StringVar] = {}
+
+        # Drag-and-drop state
+        self._drag_entry_id:  "str | None"         = None
+        self._drag_display:   str                  = ""
+        self._drag_start_xy:  tuple                = (0, 0)
+        self._drag_ghost:     "tk.Toplevel | None" = None
+        self._drag_target_id: object               = _DRAG_NONE
+        self._drag_headers:   list                 = []  # [(hdr_frame, creator_id_or_None)]
+        self._drag_active_hdr: "tk.Frame | None"   = None
+        self._drag_hdr_colors: dict                = {}  # hdr_frame -> saved bg
 
         self._log_widget: scrolledtext.ScrolledText | None = None
+
+        # Scheduler state
+        self._scheduler_stop:   threading.Event         = threading.Event()
+        self._scheduler_thread: "threading.Thread|None" = None
+        self._scheduler_next_at: float                  = 0.0
 
         Path("config").mkdir(exist_ok=True)
         Path("downloads").mkdir(exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
         self._migrate_legacy_files()
+        self._store = CreatorStore()
+        self._store.migrate_from_legacy(PLATFORMS)
+        self._load_platform_icons()
         self._build_ui()
-        self._refresh_from_date(self._platform_ids[0])
+        self._refresh_from_date()
+
+        if self._load_setting("auto_update_enabled", False):
+            self._start_scheduler()
 
         self._tray_icon: "pystray.Icon | None" = None
         self._setup_tray()
@@ -172,9 +267,9 @@ class App(tk.Tk):
             pystray.MenuItem("Quit", self._quit_app),
         )
         return pystray.Icon(
-            "MediaDownloader",
+            "Archiver",
             icon=self._tray_img,
-            title=f"Media Downloader v{APP_VERSION}",
+            title=f"Archiver v{APP_VERSION}",
             menu=menu,
         )
 
@@ -262,6 +357,37 @@ class App(tk.Tk):
                     except OSError:
                         pass  # leave non-empty dirs alone
 
+    # ── Platform icon images ───────────────────────────────────────────────────
+    def _load_platform_icons(self):
+        """Load per-platform PNG icons from assets/, composited onto their
+        icon_bg color so transparent cut-outs are filled before display."""
+        self._platform_icons:    dict = {}
+        self._platform_icons_lg: dict = {}
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            return
+        size    = max(14, int(16 * self._sf))
+        size_lg = max(24, int(28 * self._sf))
+        for pid, cfg in PLATFORMS.items():
+            path = _MEIPASS / "assets" / f"{pid}.png"
+            if not path.exists():
+                continue
+            try:
+                hex_bg = cfg.get("icon_bg", "#ffffff")
+                r, g, b = int(hex_bg[1:3], 16), int(hex_bg[3:5], 16), int(hex_bg[5:7], 16)
+                img = Image.open(path).convert("RGBA")
+                canvas_sm = Image.new("RGBA", img.size, (r, g, b, 255))
+                composited_sm = Image.alpha_composite(canvas_sm, img)
+                self._platform_icons[pid] = ImageTk.PhotoImage(
+                    composited_sm.resize((size, size), Image.LANCZOS).convert("RGB"))
+                canvas_lg = Image.new("RGBA", img.size, (r, g, b, 255))
+                composited_lg = Image.alpha_composite(canvas_lg, img)
+                self._platform_icons_lg[pid] = ImageTk.PhotoImage(
+                    composited_lg.resize((size_lg, size_lg), Image.LANCZOS).convert("RGB"))
+            except Exception:
+                pass
+
     # ── Download dir ───────────────────────────────────────────────────────────
     def _get_download_dir(self) -> Path:
         return _read_download_dir()
@@ -292,6 +418,15 @@ class App(tk.Tk):
         rx, ry = self.winfo_rootx(), self.winfo_rooty()
         rw, rh = self.winfo_width(), self.winfo_height()
         dlg.geometry(f"{w}x{h}+{rx + (rw - w)//2}+{ry + (rh - h)//2}")
+        self.unbind_all("<MouseWheel>")
+        def _restore(_e=None):
+            if self._active_nav == 1 and self._creators_canvas:
+                self.bind_all("<MouseWheel>",
+                    lambda e: self._creators_canvas.yview_scroll(-1*(e.delta//120), "units"))
+            elif self._active_nav == 2 and self._settings_canvas:
+                self.bind_all("<MouseWheel>",
+                    lambda e: self._settings_canvas.yview_scroll(-1*(e.delta//120), "units"))
+        dlg.bind("<Destroy>", _restore)
 
     # ── Styles ─────────────────────────────────────────────────────────────────
     def _patch_styles(self):
@@ -307,6 +442,18 @@ class App(tk.Tk):
         s.configure("About.TButton", foreground=light_blue)
         s.map("About.TButton",
               foreground=[("active", "#90caff")])
+
+        # Stop button — neutral secondary; dimmed when disabled
+        s.configure("Secondary.TButton",
+                    foreground=c["text_dim"], padding=(12, 6))
+        s.map("Secondary.TButton",
+              foreground=[("disabled", c["border"]), ("active", c["text"])])
+
+        # Utility buttons (Clear log / Updates) — smaller, lower weight
+        s.configure("Utility.TButton",
+                    foreground=c["text_dim"], padding=(8, 4))
+        s.map("Utility.TButton",
+              foreground=[("active", c["text"])])
 
         s.configure("TLabelframe.Label", font=FONTS["heading"])
         s.configure("TLabel",      font=FONTS["body"])
@@ -349,13 +496,12 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
         # Nav text labels (order matches NAV_ITEMS)
-        nav_keys = ["nav.dashboard", "nav.users", "nav.settings", "nav.about"]
+        nav_keys = ["nav.dashboard", "nav.accounts", "nav.settings"]
         for i, (_, _, text_lbl, _) in enumerate(self._nav_frames):
             if i < len(nav_keys):
                 text_lbl.configure(text=self._t(nav_keys[i]))
-        # Mode buttons
-        for val, btn in self._mode_btns.items():
-            btn.configure(text=self._t(f"mode.{val}"))
+        # Mode buttons — keep dot prefix
+        self._refresh_mode_btns()
         # Theme toggle button label
         if hasattr(self, "_theme_toggle_btn"):
             self._theme_toggle_btn.configure(
@@ -378,11 +524,12 @@ class App(tk.Tk):
         sv_ttk.set_theme(self._current_theme)
         self._patch_styles()
         c = THEME_COLORS[self._current_theme]
-        self._refresh_pills()
-        self._refresh_user_rows_theme()
+        self._refresh_creator_list_theme()
         if self._log_widget:
-            self._log_widget.configure(bg=c["log_bg"], fg=c["log_fg"])
+            self._log_widget.configure(bg=c["log_bg_deep"], fg=c["log_fg"])
             self._configure_log_tags()
+        if hasattr(self, "_log_header_lbl"):
+            self._log_header_lbl.configure(bg=c["bg"], fg=c["text_dim"])
         if hasattr(self, '_theme_toggle_btn'):
             self._theme_toggle_btn.configure(
                 text=self._t("btn.switch_light") if self._current_theme == "dark"
@@ -393,13 +540,13 @@ class App(tk.Tk):
     def _build_ui(self):
         c = THEME_COLORS[self._current_theme]
 
-        self._toolbar_sep = tk.Frame(self, bg=c["border"], height=1)
-        self._toolbar_sep.pack(fill=tk.X, side=tk.TOP)
+        # ── Top bar ───────────────────────────────────────────────────────────
+        self._build_topbar(c)
 
         # ── Status bar — packed to BOTTOM before main so it isn't squeezed ───
         self._build_statusbar(c)
 
-        # ── Main: sidebar (160 px) + stacked content panels ───────────────────
+        # ── Main: sidebar (180 px) + stacked content panels ───────────────────
         self._main = tk.Frame(self, bg=c["bg"])
         self._main.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
 
@@ -413,30 +560,63 @@ class App(tk.Tk):
         self._content = tk.Frame(self._main, bg=c["bg"])
         self._content.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
-        # Stacked panels — all placed to fill content; .lift() reveals active
-        dash      = tk.Frame(self._content, bg=c["bg"])
-        users_tab = tk.Frame(self._content, bg=c["bg"])
-        sett_tab  = tk.Frame(self._content, bg=c["bg"])
-        about_tab = tk.Frame(self._content, bg=c["bg"])
-        self._panels = [dash, users_tab, sett_tab, about_tab]
-        # Panels are shown/hidden via pack/pack_forget — only the active one
-        # is in the layout so tkinter never renders the others.
+        # Panels: Dashboard, Downloads, Accounts, Settings
+        dash         = tk.Frame(self._content, bg=c["bg"])
+        accounts_tab = tk.Frame(self._content, bg=c["bg"])
+        sett_tab     = tk.Frame(self._content, bg=c["bg"])
+        self._panels = [dash, accounts_tab, sett_tab]
 
         self._build_dashboard(dash)
-        self._build_users(users_tab)
+        self._build_accounts(accounts_tab)
         self._build_settings(sett_tab)
-        self._build_about_panel(about_tab)
 
         # Sidebar nav items
         self._nav_frames: list[tuple] = []
         tk.Frame(self._sidebar, bg=c["panel"], height=int(10 * self._sf)).pack(fill=tk.X)
         for idx, (icon, key) in enumerate([
-                ("◈", "nav.dashboard"), ("☰", "nav.users"),
-                ("⚙", "nav.settings"), ("ℹ", "nav.about")]):
+                ("◈", "nav.dashboard"),
+                ("☰", "nav.accounts"),
+                ("⚙", "nav.settings")]):
             self._build_nav_item(self._sidebar, idx, icon, key)
 
         self._active_nav = -1
         self._nav_select(0)
+
+    # ── Top bar ────────────────────────────────────────────────────────────────
+    def _build_topbar(self, c):
+        _sf = self._sf
+        self._topbar = tk.Frame(self, bg=c["panel"], height=int(44 * _sf))
+        self._topbar.pack(fill=tk.X, side=tk.TOP)
+        self._topbar.pack_propagate(False)
+
+        self._topbar_sep = tk.Frame(self, bg=c["border"], height=1)
+        self._topbar_sep.pack(fill=tk.X, side=tk.TOP)
+
+        # App name + version
+        name_frame = tk.Frame(self._topbar, bg=c["panel"])
+        name_frame.pack(side=tk.LEFT, padx=int(16 * _sf), pady=int(10 * _sf))
+
+        self._topbar_name = tk.Label(
+            name_frame, text="Archiver",
+            font=FONTS["heading"], bg=c["panel"], fg=c["text"])
+        self._topbar_name.pack(side=tk.LEFT)
+
+        self._topbar_ver = tk.Label(
+            name_frame, text=f"v{APP_VERSION}",
+            font=FONTS["small"], bg=c["panel"], fg=c["text_dim"])
+        self._topbar_ver.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Right-side controls
+        right = tk.Frame(self._topbar, bg=c["panel"])
+        right.pack(side=tk.RIGHT, padx=int(12 * _sf))
+
+        self._topbar_theme_btn = ttk.Button(
+            right, text="◐", width=3, command=self._toggle_theme)
+        self._topbar_theme_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._topbar_updates_btn = ttk.Button(
+            right, text="📢", width=3, command=self._open_announcements)
+        self._topbar_updates_btn.pack(side=tk.LEFT)
 
     # ── Status bar ─────────────────────────────────────────────────────────────
     def _build_statusbar(self, c):
@@ -445,14 +625,18 @@ class App(tk.Tk):
         self._statusbar = tk.Frame(self, bg=c["panel"], height=int(30 * self._sf))
         self._statusbar.pack(fill=tk.X, side=tk.BOTTOM)
         self._statusbar.pack_propagate(False)
-        self.status_var = tk.StringVar(value="Ready")
+        self.status_var = tk.StringVar(value="Idle")
         self._status_lbl = tk.Label(
             self._statusbar, textvariable=self.status_var,
             font=FONTS["small"], bg=c["panel"], fg=c["text_dim"], padx=8)
         self._status_lbl.pack(side=tk.LEFT, pady=3)
-        self.progress = ttk.Progressbar(
-            self._statusbar, mode="indeterminate", length=120)
-        self.progress.pack(side=tk.RIGHT, padx=8, pady=3)
+
+        self._auto_next_var = tk.StringVar(value="")
+        self._auto_countdown_lbl = tk.Label(
+            self._statusbar, textvariable=self._auto_next_var,
+            font=FONTS["small"], bg=c["panel"], fg=c["text_dim"], padx=8)
+        self._auto_countdown_lbl.pack(side=tk.RIGHT, pady=3)
+
 
     # ── Sidebar nav ────────────────────────────────────────────────────────────
     def _build_nav_item(self, parent, idx: int, icon: str, key: str):
@@ -513,30 +697,53 @@ class App(tk.Tk):
             else:
                 p.pack_forget()
         self.unbind_all("<MouseWheel>")
-        if idx == 1:
-            pid = self._selected_pid()
-            self._users_title.set(PLATFORMS[pid]["label"])
-            self._entry_hint.set(self._entry_hint_text(pid))
-            self._load_users_for(pid)
-            self.bind_all("<MouseWheel>",
-                lambda e: self._users_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
-        elif idx == 2:
-            self.bind_all("<MouseWheel>",
-                lambda e: self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        if idx == 1:  # Accounts
+            self.after(50, self.focus_set)   # prevent bar entry from grabbing focus
+            self._refresh_creator_list()
+            if self._creators_canvas:
+                self.bind_all("<MouseWheel>",
+                    lambda e: self._creators_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        elif idx == 2:  # Settings
+            _INPUT_CLASSES = {"TSpinbox", "TEntry", "Entry", "Text", "Spinbox"}
+            def _sett_wheel(e):
+                if e.widget.winfo_class() in _INPUT_CLASSES:
+                    return
+                self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units")
+            self.bind_all("<MouseWheel>", _sett_wheel)
 
     def _refresh_chrome_theme(self):
         """Re-apply JetBrains palette to all chrome (non-ttk) widgets."""
         c = THEME_COLORS[self._current_theme]
-        self._toolbar_sep.configure(bg=c["border"])
+        # Top bar
+        self._topbar.configure(bg=c["panel"])
+        self._topbar_sep.configure(bg=c["border"])
+        self._topbar_name.configure(bg=c["panel"], fg=c["text"])
+        self._topbar_ver.configure(bg=c["panel"], fg=c["text_dim"])
+        for w in self._topbar.winfo_children():
+            if isinstance(w, tk.Frame):
+                w.configure(bg=c["panel"])
+        # Status bar
         self._statusbar.configure(bg=c["panel"])
         self._statusbar_sep.configure(bg=c["border"])
         self._status_lbl.configure(bg=c["panel"], fg=c["text_dim"])
+        # Main layout
         self._main.configure(bg=c["bg"])
         self._sidebar.configure(bg=c["panel"])
         self._sidebar_sep.configure(bg=c["border"])
         self._content.configure(bg=c["bg"])
         for p in self._panels:
             p.configure(bg=c["bg"])
+        # Dashboard log area
+        if hasattr(self, "_log_area"):
+            self._log_area.configure(bg=c["bg"])
+        if hasattr(self, "_log_wrap"):
+            self._log_wrap.configure(bg=c["log_border"])
+        if hasattr(self, "_log_header_lbl"):
+            self._log_header_lbl.configure(bg=c["bg"], fg=c["text_dim"])
+        # Recursively remap every tk widget's bg/fg from old palette → new palette
+        old_theme = "light" if self._current_theme == "dark" else "dark"
+        old_c     = THEME_COLORS[old_theme]
+        self._recolor_all(self, old_c, c)
         # Refresh sidebar top padding frame
         for w in self._sidebar.winfo_children():
             if isinstance(w, tk.Frame) and not any(
@@ -546,100 +753,174 @@ class App(tk.Tk):
         if self._mode_btns:
             self._refresh_mode_btns()
 
+    def _recolor_all(self, widget, old_c: dict, new_c: dict):
+        """Walk every widget; replace any bg/fg that matches an old-theme color."""
+        old_to_new = {v: new_c[k] for k, v in old_c.items()}
+        self._recolor_widget(widget, old_to_new)
+
+    def _recolor_widget(self, widget, mapping: dict):
+        for opt in ("background", "foreground"):
+            try:
+                val = str(widget.cget(opt))
+                val = val.lower()
+                if val in mapping:
+                    widget.configure(**{opt: mapping[val]})
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._recolor_widget(child, mapping)
+
     # ── Dashboard ──────────────────────────────────────────────────────────────
+    def _get_last_sync(self) -> str:
+        try:
+            import json as _j
+            if Path(UPDATE_HISTORY_FILE).exists():
+                hist = _j.loads(Path(UPDATE_HISTORY_FILE).read_text(encoding="utf-8"))
+                if hist:
+                    last = hist[-1]
+                    return f"{last.get('date', '')} {last.get('time', '')}".strip()
+        except Exception:
+            pass
+        return "Never"
+
     def _build_dashboard(self, parent):
-        top = ttk.Frame(parent)
-        top.pack(fill=tk.X, padx=18, pady=(16, 6))
+        c   = THEME_COLORS[self._current_theme]
+        _sf = self._sf
+        pad = int(16 * _sf)
+        sfg = c["status_fg"]    # lightest — status strip
+        cfg = c["text_dim"]     # mid — Mode/Auto settings labels
 
-        def _sep(row):
-            ttk.Separator(row, orient=tk.VERTICAL).pack(
-                side=tk.LEFT, fill=tk.Y, padx=24, pady=3)
+        top = tk.Frame(parent, bg=c["bg"])
+        top.pack(fill=tk.X, padx=pad, pady=(int(16 * _sf), 0))
 
-        def _label(row, key):
-            lbl = ttk.Label(row, text=self._t(key), font=FONTS["small"],
-                            foreground="#888888")
-            lbl.pack(side=tk.LEFT, padx=(0, 14))
-            self._reg(lbl, key)
+        # ── Row 1: Status strip ────────────────────────────────────────────────
+        row1 = tk.Frame(top, bg=c["bg"])
+        row1.pack(fill=tk.X, pady=(0, 14))
 
-        # ── Row 1: Platform  ·  Mode ───────────────────────────────────────────
-        row1 = ttk.Frame(top)
-        row1.pack(fill=tk.X, pady=(0, 6))
+        def _seg(label, var):
+            tk.Label(row1, text=label, font=FONTS["small"],
+                     bg=c["bg"], fg=sfg).pack(side=tk.LEFT)
+            tk.Label(row1, textvariable=var, font=FONTS["small"],
+                     bg=c["bg"], fg=sfg).pack(side=tk.LEFT, padx=(3, 0))
 
-        _label(row1, "label.platform")
-        for pid in self._platform_ids:
-            self._build_platform_pill(row1, pid)
-        self._refresh_pills()
+        def _pipe():
+            tk.Label(row1, text="  |  ", font=FONTS["small"],
+                     bg=c["bg"], fg=sfg).pack(side=tk.LEFT)
 
-        _sep(row1)
+        _seg("Status:", self.status_var)
+        _pipe()
+        self._last_sync_var = tk.StringVar(value=self._get_last_sync())
+        _seg("Last Sync:", self._last_sync_var)
+        _pipe()
+        self._tracking_var = tk.StringVar(
+            value=f"{len(self._store.all_entries())} accounts")
+        _seg("Tracking:", self._tracking_var)
 
-        _label(row1, "label.mode")
-        self.mode_var = tk.StringVar(value="update")
-        for val in ("update", "full"):
-            btn = tk.Label(row1, text=self._t(f"mode.{val}"), font=FONTS["body"],
-                           cursor="hand2", padx=8, pady=3,
-                           relief=tk.FLAT, bd=0, highlightthickness=1)
-            btn.pack(side=tk.LEFT, padx=(0, 2))
-            btn.bind("<Button-1>", lambda _e, v=val: self._set_mode(v))
-            self._mode_btns[val] = btn
-        self._refresh_mode_btns()
+        # ── Row 2a: Primary actions ────────────────────────────────────────────
+        row2a = tk.Frame(top, bg=c["bg"])
+        row2a.pack(fill=tk.X, pady=(0, 12))
 
-        # ── Row 2: From date  ·  Actions  ·  Utilities  ──────────────────────
-        row2 = ttk.Frame(top)
-        row2.pack(fill=tk.X, pady=(0, 6))
+        self.start_btn = self._reg(
+            ttk.Button(row2a, text=self._t("btn.start"),
+                       style="Accent.TButton", command=self.start),
+            "btn.start")
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Recent N days (full mode only) — wrapped in a frame for easy show/hide
-        self._from_days_frame = ttk.Frame(row2)
-        self._from_days_frame.pack(side=tk.LEFT)
-        self._reg(
-            ttk.Label(self._from_days_frame, text=self._t("label.last"),
-                      foreground="#888888", font=FONTS["small"]),
-            "label.last").pack(side=tk.LEFT, padx=(0, 4))
-        self._from_days_sb = ttk.Spinbox(self._from_days_frame,
-                                         textvariable=self._from_days_var,
-                                         from_=0, to=3650, width=4,
-                                         font=FONTS["mono"])
-        self._from_days_sb.pack(side=tk.LEFT)
-        self._reg(
-            ttk.Label(self._from_days_frame, text=self._t("label.days_all"),
-                      foreground="#888888", font=FONTS["small"]),
-            "label.days_all").pack(side=tk.LEFT)
-        self._refresh_mode_btns()   # apply initial show/hide
-
-        _sep(row2)
-
-        # Start / Stop
-        self.start_btn = ttk.Button(row2, text=self._t("btn.start"),
-                                    style="Accent.TButton", command=self.start)
-        self._reg(self.start_btn, "btn.start")
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 14))
-        self.stop_btn = ttk.Button(row2, text=self._t("btn.stop"),
-                                   style="Danger.TButton",
-                                   command=self.stop, state=tk.DISABLED)
-        self._reg(self.stop_btn, "btn.stop")
+        self.stop_btn = self._reg(
+            ttk.Button(row2a, text=self._t("btn.stop"),
+                       style="Secondary.TButton", command=self.stop,
+                       state=tk.DISABLED),
+            "btn.stop")
         self.stop_btn.pack(side=tk.LEFT)
 
-        _sep(row2)
+        # ── Row 2b: Settings + utilities ──────────────────────────────────────
+        self._row2b = tk.Frame(top, bg=c["bg"])
+        self._row2b.pack(fill=tk.X)
+        row2b = self._row2b
 
-        # Utilities
+        # Mode — radio-dots (first)
+        self._mode_lbl = tk.Label(row2b, text="Mode:", font=FONTS["body"],
+                                  bg=c["bg"], fg=cfg)
+        self._mode_lbl.pack(side=tk.LEFT, anchor="center", padx=(0, 6))
+
+        self.mode_var = tk.StringVar(value="update")
+        self._mode_btns: dict[str, tk.Label] = {}
+        for val in ("update", "full"):
+            lbl = tk.Label(row2b, font=FONTS["body"],
+                           cursor="hand2", bd=0, highlightthickness=0,
+                           bg=c["bg"])
+            lbl.pack(side=tk.LEFT, anchor="center", padx=(0, 14))
+            lbl.bind("<Button-1>", lambda _e, v=val: self._set_mode(v))
+            self._mode_btns[val] = lbl
+
+        # "Last N days" spinbox — inline after Full when selected
+        self._from_days_frame = tk.Frame(row2b, bg=c["bg"])
+        self._reg(
+            tk.Label(self._from_days_frame, text=self._t("label.last"),
+                     bg=c["bg"], fg=cfg, font=FONTS["body"]),
+            "label.last").pack(side=tk.LEFT, anchor="center", padx=(0, 4))
+        self._from_days_sb = ttk.Spinbox(
+            self._from_days_frame, textvariable=self._from_days_var,
+            from_=0, to=3650, width=4, font=FONTS["mono"])
+        self._from_days_sb.pack(side=tk.LEFT, anchor="center")
+        self._reg(
+            tk.Label(self._from_days_frame, text=self._t("label.days_all"),
+                     bg=c["bg"], fg=cfg, font=FONTS["body"]),
+            "label.days_all").pack(side=tk.LEFT, anchor="center")
+
+        # Auto toggle — after mode buttons
+        TW, TH = 44, 24
+        self._auto_pill = tk.Canvas(row2b, width=TW, height=TH,
+                                    highlightthickness=0, bg=c["bg"],
+                                    cursor="hand2")
+        self._auto_pill.pack(side=tk.LEFT, anchor="center", padx=(20, 4), pady=(8, 0))
+        self._auto_pill.bind("<Button-1>",
+                             lambda _e: self._toggle_auto_from_dashboard())
+
+        self._auto_lbl = tk.Label(row2b, text="Auto", font=FONTS["small"],
+                                  bg=c["bg"], fg=cfg, cursor="hand2")
+        self._auto_lbl.pack(side=tk.LEFT, anchor="center")
+        self._auto_lbl.bind("<Button-1>",
+                            lambda _e: self._toggle_auto_from_dashboard())
+
+        self._refresh_mode_btns()
+        self._refresh_auto_pill()
+
+        # Utilities — right-aligned, inside the countdown
         for key, cmd in [
-            ("btn.clear_log",  self.clear_log),
-            ("btn.downloads",  self._open_downloads),
-            ("btn.post_url",   self._download_post_url),
-            ("btn.updates",    self._open_announcements),
+            ("btn.downloads", self._open_downloads),
+            ("btn.clear_log", self.clear_log),
         ]:
             self._reg(
-                ttk.Button(row2, text=self._t(key), command=cmd),
-                key).pack(side=tk.LEFT, padx=(0, 14))
+                ttk.Button(row2b, text=self._t(key), command=cmd,
+                           style="Utility.TButton"),
+                key).pack(side=tk.RIGHT, padx=(4, 0))
 
-        # ── Log ───────────────────────────────────────────────────────────────
-        log_f = ttk.LabelFrame(parent, text=self._t("log.title"), padding=4)
-        self._reg(log_f, "log.title")
-        log_f.pack(fill=tk.BOTH, expand=True, padx=18, pady=(10, 14))
+        # ── Separator ─────────────────────────────────────────────────────────
+        tk.Frame(top, height=1, bg=c["border"]).pack(fill=tk.X, pady=(14, 0))
 
-        c = THEME_COLORS[self._current_theme]
+        # ── Progress bar — between controls and log ────────────────────────────
+        self.progress = _ThinBar(parent, accent=c["accent"], bg=c["bg"])
+        self.progress.pack(fill=tk.X, padx=pad, pady=(6, 0))
+
+        # ── Log — dim label then bordered scrolledtext, no heavy header bar ───
+        self._log_area = tk.Frame(parent, bg=c["bg"])
+        self._log_area.pack(fill=tk.BOTH, expand=True,
+                            padx=pad, pady=(int(10 * _sf), int(14 * _sf)))
+
+        self._log_header_lbl = tk.Label(
+            self._log_area, text=self._t("log.title"),
+            bg=c["bg"], fg=cfg, font=FONTS["small"], anchor="w")
+        self._reg(self._log_header_lbl, "log.title")
+        self._log_header_lbl.pack(fill=tk.X, pady=(0, 4))
+
+        self._log_wrap = tk.Frame(self._log_area, bg=c["log_border"], bd=0)
+        self._log_wrap.pack(fill=tk.BOTH, expand=True)
+
         self._log_widget = scrolledtext.ScrolledText(
-            log_f, state="disabled", wrap=tk.WORD,
-            bg=c["log_bg"], fg=c["log_fg"], insertbackground=c["log_fg"],
+            self._log_wrap, state="disabled", wrap=tk.WORD,
+            bg=c["log_bg_deep"], fg=c["log_fg"],
+            insertbackground=c["log_fg"],
             font=FONTS["mono"], relief=tk.FLAT, borderwidth=0,
             selectbackground="#264f78",
         )
@@ -654,49 +935,227 @@ class App(tk.Tk):
         self._log_widget.tag_config("dim",     foreground="#555555")
         self._log_widget.tag_config("info",    foreground="#7aafff")
 
-    # ── Platform pills ─────────────────────────────────────────────────────────
-    def _build_platform_pill(self, parent, pid: str):
-        cfg  = PLATFORMS[pid]
-        c    = THEME_COLORS[self._current_theme]
-        pill = tk.Label(
-            parent,
-            text=f"  {cfg['label']}  ",
-            font=FONTS["body"],
-            cursor="hand2",
-            padx=4, pady=3,
-            relief=tk.FLAT, bd=0,
-            highlightthickness=1,
-            highlightbackground=c["border"],
-        )
-        pill.pack(side=tk.LEFT, padx=(0, 4))
-        pill.bind("<Button-1>", lambda _e, p=pid: self._select_platform(p))
-        pill.bind("<Enter>",    lambda _e, p=pid: self._pill_hover(p, True))
-        pill.bind("<Leave>",    lambda _e, p=pid: self._pill_hover(p, False))
-        self._platform_pills[pid] = pill
+    # ── Downloads panel ────────────────────────────────────────────────────────
+    def _build_downloads(self, parent):
+        c   = THEME_COLORS[self._current_theme]
+        _sf = self._sf
 
-    def _pill_hover(self, pid: str, entering: bool):
-        if pid == self._platform_sel.get():
+        # ── URL input section ─────────────────────────────────────────────────
+        self._dl_input_frame = tk.Frame(parent, bg=c["panel"],
+                                        highlightthickness=1,
+                                        highlightbackground=c["border"])
+        self._dl_input_frame.pack(fill=tk.X, padx=int(18 * _sf),
+                                   pady=(int(16 * _sf), 0))
+        input_frame = self._dl_input_frame
+
+        inner = tk.Frame(input_frame, bg=c["panel"])
+        inner.pack(fill=tk.X, padx=int(16 * _sf), pady=int(12 * _sf))
+
+        url_row = tk.Frame(inner, bg=c["panel"])
+        url_row.pack(fill=tk.X)
+        self._dl_url_var = tk.StringVar()
+        url_entry = ttk.Entry(url_row, textvariable=self._dl_url_var,
+                              font=FONTS["body"])
+        url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4,
+                       padx=(0, int(10 * _sf)))
+
+        self._dl_detected_var = tk.StringVar(value="")
+        dl_btn = ttk.Button(url_row, text=self._t("dl.new"),
+                            style="Accent.TButton",
+                            command=self._dl_panel_start)
+        self._reg(dl_btn, "dl.new")
+        dl_btn.pack(side=tk.LEFT)
+
+        hint_row = tk.Frame(inner, bg=c["panel"])
+        hint_row.pack(fill=tk.X, pady=(int(4 * _sf), 0))
+        self._dl_hint_var = tk.StringVar(value=self._t("dl.input_hint"))
+        hint_lbl = tk.Label(hint_row, textvariable=self._dl_hint_var,
+                            font=FONTS["small"], bg=c["panel"], fg=c["text_dim"])
+        hint_lbl.pack(side=tk.LEFT)
+
+        plat_lbl = tk.Label(hint_row, textvariable=self._dl_detected_var,
+                            font=(*FONTS["small"], "bold"),
+                            bg=c["panel"], fg=c["accent"])
+        plat_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
+        def _on_url_change(*_):
+            text = self._dl_url_var.get()
+            pid  = self._detect_platform_from_url(text)
+            if pid and text:
+                self._dl_detected_var.set(PLATFORMS[pid]["label"])
+                self._dl_hint_var.set("")
+            else:
+                self._dl_detected_var.set("")
+                self._dl_hint_var.set(self._t("dl.input_hint"))
+
+        self._dl_url_var.trace_add("write", _on_url_change)
+        url_entry.bind("<Return>", lambda _: self._dl_panel_start())
+
+        # ── Toolbar ───────────────────────────────────────────────────────────
+        toolbar = tk.Frame(parent, bg=c["bg"])
+        toolbar.pack(fill=tk.X, padx=int(18 * _sf), pady=(int(12 * _sf), int(4 * _sf)))
+
+        self._reg(
+            ttk.Button(toolbar, text=self._t("dl.refresh"),
+                       command=self._refresh_downloads_list),
+            "dl.refresh").pack(side=tk.LEFT, padx=(0, 6))
+        self._reg(
+            ttk.Button(toolbar, text=self._t("dl.open_folder"),
+                       command=self._open_downloads),
+            "dl.open_folder").pack(side=tk.LEFT)
+
+        self._dl_count_var = tk.StringVar(value="")
+        tk.Label(toolbar, textvariable=self._dl_count_var,
+                 font=FONTS["small"], bg=c["bg"],
+                 fg=c["text_dim"]).pack(side=tk.RIGHT)
+
+        # ── Downloads table ───────────────────────────────────────────────────
+        table_frame = tk.Frame(parent, bg=c["bg"])
+        table_frame.pack(fill=tk.BOTH, expand=True,
+                         padx=int(18 * _sf), pady=(0, int(14 * _sf)))
+
+        cols = ("name", "platform", "size", "date")
+        self._dl_tree = ttk.Treeview(
+            table_frame, columns=cols, show="headings",
+            selectmode="browse")
+
+        col_conf = [
+            ("name",     self._t("dl.col_name"),  400, tk.W),
+            ("platform", self._t("dl.col_plat"),  100, tk.CENTER),
+            ("size",     self._t("dl.col_size"),   80, tk.E),
+            ("date",     self._t("dl.col_date"),  130, tk.CENTER),
+        ]
+        for cid, heading, width, anchor in col_conf:
+            self._dl_tree.heading(cid, text=heading, anchor=anchor)
+            self._dl_tree.column(cid, width=int(width * _sf),
+                                 minwidth=int(50 * _sf), anchor=anchor)
+
+        vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL,
+                            command=self._dl_tree.yview)
+        self._dl_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._dl_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Right-click context menu
+        self._dl_ctx = tk.Menu(self, tearoff=0)
+        self._dl_ctx.add_command(label="Open in Explorer",
+                                 command=self._dl_ctx_open)
+        self._dl_ctx.add_command(label="Delete File",
+                                 command=self._dl_ctx_delete)
+
+        self._dl_tree.bind("<Button-3>", self._dl_show_ctx)
+
+        self._dl_empty_lbl = tk.Label(
+            table_frame, text=self._t("dl.empty"),
+            font=FONTS["small"], bg=c["bg"], fg=c["text_dim"])
+
+        self._refresh_downloads_list()
+
+    def _detect_platform_from_url(self, url: str) -> "str | None":
+        _MAP = [
+            ("x.com",        "x"),  ("twitter.com", "x"),
+            ("bilibili.com", "bilibili"), ("b23.tv", "bilibili"),
+            ("douyin.com",   "douyin"),   ("iesdouyin.com", "douyin"),
+        ]
+        for domain, pid in _MAP:
+            if domain in url:
+                return pid
+        return None
+
+    def _dl_panel_start(self):
+        url = self._dl_url_var.get().strip()
+        if not url:
             return
-        c  = THEME_COLORS[self._current_theme]
-        bg = c["hover"] if entering else c["pill_bg"]
-        self._platform_pills[pid].configure(bg=bg, highlightbackground=c["border"])
+        pid = self._detect_platform_from_url(url)
+        if pid is None:
+            self._dl_detected_var.set("⚠ Unknown platform")
+            return
+        cfg = PLATFORMS[pid]
+        if not Path(cfg["cookies_file"]).exists():
+            messagebox.showwarning(
+                "No cookies",
+                f"Cookies not found for {cfg['label']}.\nGo to Settings → Authentication.")
+            return
+        self._dl_url_var.set("")
+        self._dl_detected_var.set("")
+        self._run_single_post(pid, url)
 
-    def _refresh_pills(self):
-        c = THEME_COLORS[self._current_theme]
-        for pid, pill in self._platform_pills.items():
-            cfg      = PLATFORMS[pid]
-            selected = pid == self._platform_sel.get()
-            pill.configure(
-                bg=cfg["color"]  if selected else c["pill_bg"],
-                fg="#ffffff"     if selected else c["text"],
-                font=(*FONTS["body"], "bold") if selected else FONTS["body"],
-                highlightbackground=cfg["color"] if selected else c["border"],
-            )
+    def _refresh_downloads_list(self):
+        if not hasattr(self, "_dl_tree"):
+            return
+        import datetime as _dt
+        tree = self._dl_tree
+        tree.delete(*tree.get_children())
 
-    def _select_platform(self, pid: str):
-        self._platform_sel.set(pid)
-        self._refresh_pills()
-        self._on_platform_change()
+        base   = self._get_download_dir()
+        _PLAT  = {"x": "X", "bilibili": "Bilibili", "douyin": "Douyin", "url": "—"}
+        rows   = []
+
+        if base.exists():
+            for f in base.rglob("*"):
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() not in _MEDIA_EXTS:
+                    continue
+                try:
+                    parts = f.relative_to(base).parts
+                    plat  = _PLAT.get(parts[0], parts[0]) if parts else "—"
+                    size  = f.stat().st_size
+                    mtime = f.stat().st_mtime
+                    rows.append((f, plat, size, mtime))
+                except Exception:
+                    continue
+
+        rows.sort(key=lambda r: r[3], reverse=True)
+
+        for f, plat, size, mtime in rows[:500]:
+            size_str = (f"{size // (1024*1024)} MB" if size >= 1024*1024
+                        else f"{size // 1024} KB")
+            date_str = _dt.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            iid = tree.insert("", tk.END, values=(f.name, plat, size_str, date_str))
+            tree.item(iid, tags=(str(f),))
+
+        count = len(rows)
+        self._dl_count_var.set(f"{count} file{'s' if count != 1 else ''}")
+
+        if count == 0:
+            self._dl_empty_lbl.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self._dl_empty_lbl.place_forget()
+
+    def _dl_show_ctx(self, event):
+        item = self._dl_tree.identify_row(event.y)
+        if not item:
+            return
+        self._dl_tree.selection_set(item)
+        try:
+            self._dl_ctx.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._dl_ctx.grab_release()
+
+    def _dl_ctx_open(self):
+        sel = self._dl_tree.selection()
+        if not sel:
+            return
+        tags = self._dl_tree.item(sel[0], "tags")
+        if tags:
+            subprocess.Popen(["explorer", "/select,", tags[0]])
+
+    def _dl_ctx_delete(self):
+        sel = self._dl_tree.selection()
+        if not sel:
+            return
+        tags = self._dl_tree.item(sel[0], "tags")
+        if not tags:
+            return
+        fp = Path(tags[0])
+        from tkinter import messagebox as _mb
+        if _mb.askyesno("Delete", f'Delete "{fp.name}"?', parent=self):
+            try:
+                fp.unlink()
+            except Exception as e:
+                _mb.showerror("Error", str(e))
+            self._refresh_downloads_list()
 
     # ── Mode toggle ────────────────────────────────────────────────────────────
     def _set_mode(self, val: str):
@@ -706,404 +1165,1205 @@ class App(tk.Tk):
     def _refresh_mode_btns(self):
         c       = THEME_COLORS[self._current_theme]
         is_full = self.mode_var.get() == "full"
+        labels  = {"update": self._t("mode.update"), "full": self._t("mode.full")}
+        row_bg  = str(self._row2b.cget("background")) if hasattr(self, "_row2b") else c["bg"]
         for val, btn in self._mode_btns.items():
             sel = val == self.mode_var.get()
+            dot = "●" if sel else "○"
             btn.configure(
-                bg=c["accent"]  if sel else c["panel"],
-                fg="#ffffff"    if sel else c["text"],
-                highlightbackground=c["accent"] if sel else c["border"],
+                text=f"{dot} {labels[val]}",
+                fg=c["text"] if sel else c["status_fg"],
+                bg=row_bg,
             )
+        for attr in ("_auto_lbl", "_mode_lbl"):
+            if hasattr(self, attr):
+                getattr(self, attr).configure(bg=row_bg, fg=c["text_dim"])
+        if hasattr(self, "_auto_pill"):
+            self._auto_pill.configure(bg=row_bg)
         if hasattr(self, "_from_days_frame"):
+            self._from_days_frame.configure(bg=row_bg)
+            for w in self._from_days_frame.winfo_children():
+                if isinstance(w, tk.Label):
+                    w.configure(bg=row_bg)
             if is_full:
                 self._from_days_frame.pack(side=tk.LEFT)
             else:
                 self._from_days_frame.pack_forget()
 
-    # ── Tab change ─────────────────────────────────────────────────────────────
-    def _on_tab_changed(self, _event=None):
-        idx = self._nb.index(self._nb.select())
-        self.unbind_all("<MouseWheel>")
-        if idx == 1:
-            pid = self._selected_pid()
-            self._users_title.set(PLATFORMS[pid]["label"])
-            self._entry_hint.set(self._entry_hint_text(pid))
-            self._load_users_for(pid)
-            self.bind_all("<MouseWheel>",
-                lambda e: self._users_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
-        elif idx == 2:
-            self.bind_all("<MouseWheel>",
-                lambda e: self._settings_canvas.yview_scroll(-1 * (e.delta // 120), "units"))
-
-    # ── Platform helpers ───────────────────────────────────────────────────────
-    def _selected_pid(self) -> str:
-        return self._platform_sel.get()
-
-    def _entry_hint_text(self, pid: str) -> str:
-        hints = {
-            "x":        "Enter X username  (e.g. elonmusk)",
-            "douyin":   "Paste a profile URL or sec_uid",
-            "bilibili": "Enter UID or paste space URL",
-        }
-        return hints.get(pid, "Enter account identifier")
-
-    def _on_platform_change(self, _event=None):
-        pid = self._selected_pid()
-        self._users_title.set(PLATFORMS[pid]["label"])
-        self._entry_hint.set(self._entry_hint_text(pid))
-        self._load_users_for(pid)
-        self._refresh_from_date(pid)
-
-    def _refresh_from_date(self, _pid: str):
-        """Reset 'Last N days' spinbox to 0 (= from last run)."""
+    def _refresh_from_date(self):
         self._from_days_var.set("0")
 
-    # ── Users ──────────────────────────────────────────────────────────────────
-    def _build_users(self, parent):
-        frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
-        frame.rowconfigure(1, weight=1)
-        frame.columnconfigure(0, weight=1)
-
-        self._users_title.set(PLATFORMS[self._platform_ids[0]]["label"])
-        ttk.Label(frame, textvariable=self._users_title,
-                  font=FONTS["heading"]
-                  ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-
-        inner = ttk.LabelFrame(frame, text=self._t("users.list"), padding=6)
-        self._reg(inner, "users.list")
-        inner.grid(row=1, column=0, sticky="nsew")
-        inner.rowconfigure(0, weight=1)
-        inner.columnconfigure(0, weight=1)
-
+    # ── Accounts ────────────────────────────────────────────────────────────────
+    def _build_accounts(self, parent):
+        import re as _re, http.client, ssl, urllib.parse, json as _json
         c = THEME_COLORS[self._current_theme]
 
-        self._users_canvas = tk.Canvas(inner, bg=c["list_bg"], highlightthickness=0)
-        sb = ttk.Scrollbar(inner, command=self._users_canvas.yview)
-        self._users_canvas.configure(yscrollcommand=sb.set)
-        self._users_canvas.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
-        sb.grid(row=0, column=1, sticky="ns", pady=(0, 6))
+        # ── Top bar ───────────────────────────────────────────────────────────
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X, padx=12, pady=(8, 4))
+        self._reg(
+            ttk.Label(top, text=self._t("accounts.heading"), font=FONTS["heading"]),
+            "accounts.heading").pack(side=tk.LEFT)
+        ttk.Button(top, text="Manage Creators", style="Secondary.TButton",
+                   command=self._show_creator_manager).pack(side=tk.RIGHT)
 
-        self._users_inner = tk.Frame(self._users_canvas, bg=c["list_bg"])
-        self._canvas_win  = self._users_canvas.create_window(
-            (0, 0), window=self._users_inner, anchor="nw")
-        self._users_inner.bind(
+        # ── Creator list ──────────────────────────────────────────────────────
+        self._accounts_border = tk.Frame(parent, bg=c["border"])
+        self._accounts_border.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 0))
+        container = tk.Frame(self._accounts_border, bg=c["list_bg"])
+        container.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        self._creators_canvas = tk.Canvas(container, bg=c["list_bg"], highlightthickness=0)
+        sb = ttk.Scrollbar(container, command=self._creators_canvas.yview)
+        self._creators_canvas.configure(yscrollcommand=sb.set)
+        self._creators_canvas.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
+
+        self._creators_inner = tk.Frame(self._creators_canvas, bg=c["list_bg"])
+        self._creators_win   = self._creators_canvas.create_window(
+            (0, 0), window=self._creators_inner, anchor="nw")
+        self._creators_inner.bind(
             "<Configure>",
-            lambda e: self._users_canvas.configure(
-                scrollregion=self._users_canvas.bbox("all")))
-        self._users_canvas.bind(
+            lambda e: self._creators_canvas.configure(
+                scrollregion=self._creators_canvas.bbox("all")))
+        self._creators_canvas.bind(
             "<Configure>",
-            lambda e: self._users_canvas.itemconfig(self._canvas_win, width=e.width))
+            lambda e: self._creators_canvas.itemconfig(self._creators_win, width=e.width))
 
-        entry_f = ttk.Frame(inner)
-        entry_f.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        self._users_entry = ttk.Entry(entry_f, font=FONTS["body"])
-        self._users_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self._users_entry.bind("<Return>", lambda _: self._add_user())
-        self._reg(ttk.Button(entry_f, text=self._t("btn.add"),    command=self._add_user),
-                  "btn.add").pack(side=tk.LEFT, padx=(0, 4))
-        self._reg(ttk.Button(entry_f, text=self._t("btn.remove"), command=self._remove_user),
-                  "btn.remove").pack(side=tk.LEFT)
+        # ── Bottom input bar ──────────────────────────────────────────────────
+        _URL_DETECT = [
+            (_re.compile(r"x\.com|twitter\.com"),       "x"),
+            (_re.compile(r"bilibili\.com|b23\.tv"),      "bilibili"),
+            (_re.compile(r"douyin\.com|iesdouyin\.com"), "douyin"),
+        ]
 
-        self._entry_hint.set(self._entry_hint_text(self._platform_ids[0]))
-        ttk.Label(inner, textvariable=self._entry_hint,
-                  font=FONTS["small"]).grid(row=2, column=0, columnspan=2,
-                                            sticky="w", pady=(2, 0))
+        def _infer_pid(text: str) -> "str | None":
+            for pat, pid in _URL_DETECT:
+                if pat.search(text):
+                    return pid
+            if _re.match(r'^@?[A-Za-z0-9_]{1,50}$', text):
+                return "x"
+            return None
 
-        self._load_users_for(self._platform_ids[0])
+        _pid_state: list = [None]
 
-    def _load_users_for(self, pid: str):
-        cfg = PLATFORMS[pid]
-        for w in self._users_inner.winfo_children():
-            w.destroy()
-        self._user_raw[pid]  = []
-        self._user_rows[pid] = []
-        self._sel_row        = None
+        bar = tk.Frame(parent, bg=c["panel"], highlightthickness=1,
+                       highlightbackground=c["border"])
+        bar.pack(fill=tk.X, padx=12, pady=(4, 8))
 
-        p = Path(cfg["users_file"])
-        if p.exists():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                display = line.split("|")[0] if cfg["entry_format"] == "name|id" else line
-                self._user_raw[pid].append(line)
-                self._append_user_row(pid, display)
+        _entry_var = tk.StringVar()
+        self._bar_entry = ttk.Entry(bar, textvariable=_entry_var, font=FONTS["body"])
+        self._bar_entry.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                             padx=(8, 6), pady=6, ipady=3)
 
-    def _append_user_row(self, pid: str, display: str):
-        c   = THEME_COLORS[self._current_theme]
-        idx = len(self._user_rows.get(pid, []))
+        _plat_var = tk.StringVar()
+        tk.Label(bar, textvariable=_plat_var, font=FONTS["small"],
+                 bg=c["panel"], fg=c["text_dim"]).pack(side=tk.LEFT, padx=(0, 6))
 
-        row = tk.Frame(self._users_inner, bg=c["list_bg"], cursor="hand2")
-        row.pack(fill=tk.X, pady=0)
+        def _on_entry_change(*_):
+            pid = _infer_pid(_entry_var.get().strip())
+            _pid_state[0] = pid
+            _plat_var.set(PLATFORMS[pid]["label"] if pid else "")
 
-        # 3px left accent bar — mirrors the sidebar selection style
-        bar = tk.Frame(row, bg=c["list_bg"], width=3)
-        bar.pack(side=tk.LEFT, fill=tk.Y)
+        _entry_var.trace_add("write", _on_entry_change)
 
-        lbl = tk.Label(row, text=display, bg=c["list_bg"], fg=c["list_fg"],
-                       font=FONTS["body"], anchor="w")
-        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 8), pady=5)
-
-        for w in (row, bar, lbl):
-            w.bind("<Button-1>", lambda _e, i=idx, p=pid:
-                   self._select_user_row(i, p))
-
-        self._user_rows.setdefault(pid, []).append(row)
-
-    def _select_user_row(self, idx: int, pid: str):
-        self._sel_row = idx
-        c = THEME_COLORS[self._current_theme]
-        for i, row in enumerate(self._user_rows.get(pid, [])):
-            sel = i == idx
-            bg  = c["hover"] if sel else c["list_bg"]
-            row.configure(bg=bg)
-            for w in row.winfo_children():
-                if isinstance(w, tk.Frame):   # accent bar
-                    w.configure(bg=c["accent"] if sel else c["list_bg"])
-                elif isinstance(w, tk.Label):
-                    w.configure(bg=bg, fg=c["list_fg"])
-
-    def _refresh_user_rows_theme(self):
-        if self._users_canvas is None:
-            return
-        c   = THEME_COLORS[self._current_theme]
-        pid = self._selected_pid()
-        self._users_canvas.configure(bg=c["list_bg"])
-        self._users_inner.configure(bg=c["list_bg"])
-        for i, row in enumerate(self._user_rows.get(pid, [])):
-            sel = i == self._sel_row
-            bg  = c["hover"] if sel else c["list_bg"]
-            row.configure(bg=bg)
-            for w in row.winfo_children():
-                if isinstance(w, tk.Frame):
-                    w.configure(bg=c["accent"] if sel else c["list_bg"])
-                elif isinstance(w, tk.Label):
-                    w.configure(bg=bg, fg=c["list_fg"])
-
-    def _add_user(self):
-        pid = self._selected_pid()
-        cfg = PLATFORMS[pid]
-        if cfg["entry_format"] == "name|id":
-            self._add_user_named(pid)
-        else:
-            username = self._users_entry.get().strip().lstrip("@")
-            if username and username not in self._user_raw.get(pid, []):
-                self._user_raw.setdefault(pid, []).append(username)
-                self._append_user_row(pid, username)
-                self._save_users(pid)
-            self._users_entry.delete(0, tk.END)
-
-    def _add_user_named(self, pid: str):
-        import re, http.client, ssl, urllib.parse, json as _json
-
-        raw_input = self._users_entry.get().strip()
-        self._users_entry.delete(0, tk.END)
-        if not raw_input:
-            return
-
-        cfg = PLATFORMS[pid]
-        orig_hint = self._entry_hint.get()
-
-        if pid == "bilibili":
-            # Accept: space.bilibili.com/{uid} URL or bare UID
-            m = re.search(r"space\.bilibili\.com/(\d+)", raw_input)
-            uid = m.group(1) if m else raw_input.strip()
-            if not uid.isdigit():
-                messagebox.showwarning("Invalid input",
-                                       "Please enter a numeric UID or a bilibili space URL.")
+        def _do_add():
+            raw = _entry_var.get().strip()
+            pid = _pid_state[0]
+            if not raw or pid is None:
                 return
+            cfg = PLATFORMS[pid]
 
-            self._entry_hint.set("Resolving username…")
-            self._users_entry.configure(state="disabled")
+            def _finish(handle: str, creator_name: str):
+                creator = self._store.add_creator(creator_name)
+                self._store.add_entry(pid, handle, creator.id)
+                _entry_var.set("")
+                self._refresh_creator_list()
 
-            def fetch_bilibili():
-                nickname = None
-                error    = None
-                try:
-                    ctx  = ssl.create_default_context()
-                    conn = http.client.HTTPSConnection("api.bilibili.com", timeout=10, context=ctx)
-                    conn.request("GET", f"/x/web-interface/card?mid={uid}", headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                      "Chrome/120.0.0.0 Safari/537.36",
-                        "Referer":    "https://www.bilibili.com/",
-                        "Accept":     "application/json",
-                    })
-                    resp = conn.getresponse()
-                    data = _json.loads(resp.read())
-                    conn.close()
-                    if data.get("code") != 0:
-                        error = f"UID {uid} not found (code {data.get('code')})."
-                    else:
-                        nickname = (data.get("data") or {}).get("card", {}).get("name") or None
-                except Exception as exc:
-                    error = str(exc)
+            if pid == "x":
+                handle = raw.lstrip("@")
+                _finish(handle, handle)
 
-                def apply():
-                    self._users_entry.configure(state="normal")
-                    self._entry_hint.set(orig_hint)
-                    if error:
-                        messagebox.showerror("Bilibili lookup failed", error)
-                        return
-                    display = nickname if nickname else uid
-                    raw     = f"{display}|{uid}"
-                    if raw not in self._user_raw.get(pid, []):
-                        self._user_raw.setdefault(pid, []).append(raw)
-                        self._append_user_row(pid, display)
-                        self._save_users(pid)
+            elif pid == "bilibili":
+                m   = _re.search(r"space\.bilibili\.com/(\d+)", raw)
+                uid = m.group(1) if m else raw
+                if not uid.isdigit():
+                    return
+                self._bar_entry.configure(state="disabled")
+                self._bar_add_btn.configure(state=tk.DISABLED)
 
-                self.after(0, apply)
+                def _fetch_bl():
+                    nick = None
+                    try:
+                        ctx  = ssl.create_default_context()
+                        conn = http.client.HTTPSConnection(
+                            "api.bilibili.com", timeout=10, context=ctx)
+                        conn.request("GET", f"/x/web-interface/card?mid={uid}",
+                                     headers={"User-Agent": "Mozilla/5.0",
+                                              "Referer": "https://www.bilibili.com/",
+                                              "Accept": "application/json"})
+                        data = _json.loads(conn.getresponse().read())
+                        conn.close()
+                        if data.get("code") == 0:
+                            nick = (data.get("data") or {}).get("card", {}).get("name")
+                    except Exception:
+                        pass
+                    def _apply():
+                        self._bar_entry.configure(state="normal")
+                        self._bar_add_btn.configure(state=tk.NORMAL)
+                        name = nick or uid
+                        _finish(f"{name}|{uid}", name)
+                    self.after(0, _apply)
 
-            threading.Thread(target=fetch_bilibili, daemon=True).start()
+                threading.Thread(target=_fetch_bl, daemon=True).start()
+
+            elif pid == "douyin":
+                m       = _re.search(r"/user/([^/?#]+)", raw)
+                sec_uid = m.group(1) if m else raw
+                self._bar_entry.configure(state="disabled")
+                self._bar_add_btn.configure(state=tk.DISABLED)
+
+                def _fetch_dy():
+                    nick = None
+                    try:
+                        cookies: dict[str, str] = {}
+                        cf = Path(cfg["cookies_file"])
+                        if cf.exists():
+                            for line in cf.read_text(encoding="utf-8").splitlines():
+                                if line.startswith("#") or not line.strip():
+                                    continue
+                                fields = line.split("\t")
+                                if len(fields) >= 7:
+                                    cookies[fields[5].strip()] = fields[6].strip()
+                        params = urllib.parse.urlencode({
+                            "sec_user_id": sec_uid, "aid": "6383",
+                            "cookie_enabled": "true", "platform": "PC",
+                        })
+                        ctx  = ssl.create_default_context()
+                        conn = http.client.HTTPSConnection(
+                            "www.douyin.com", timeout=10, context=ctx)
+                        conn.request("GET",
+                                     f"/aweme/v1/web/user/profile/other/?{params}",
+                                     headers={
+                                         "Cookie": "; ".join(
+                                             f"{k}={v}" for k, v in cookies.items()),
+                                         "User-Agent": "Mozilla/5.0",
+                                         "Referer": "https://www.douyin.com/",
+                                         "Accept": "application/json",
+                                     })
+                        data = _json.loads(conn.getresponse().read())
+                        conn.close()
+                        nick = (data.get("user") or {}).get("nickname") or None
+                    except Exception:
+                        pass
+                    def _apply():
+                        self._bar_entry.configure(state="normal")
+                        self._bar_add_btn.configure(state=tk.NORMAL)
+                        name = nick or sec_uid
+                        _finish(f"{name}|{sec_uid}", name)
+                    self.after(0, _apply)
+
+                threading.Thread(target=_fetch_dy, daemon=True).start()
+
+        self._bar_add_btn = ttk.Button(bar, text="Add", style="Accent.TButton",
+                                       command=_do_add)
+        self._bar_add_btn.pack(side=tk.RIGHT, padx=(0, 8), pady=6)
+
+        self._bar_entry.bind("<Return>", lambda _: _do_add())
+        bar.after(100, self.focus_set)
+
+        self._refresh_creator_list()
+
+    def _show_creator_manager(self):
+        c   = THEME_COLORS[self._current_theme]
+        dlg = tk.Toplevel(self)
+        dlg.title("Manage Creators")
+        dlg.configure(bg=c["bg"])
+        dlg.resizable(False, False)
+        self._centre_dialog(dlg, 620, 820)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.bind("<Button-1>", lambda e: dlg.focus_set())
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr_f = tk.Frame(dlg, bg=c["bg"])
+        hdr_f.pack(fill=tk.X, padx=20, pady=(16, 8))
+        tk.Label(hdr_f, text="Creators", font=FONTS["heading"],
+                 bg=c["bg"], fg=c["text"]).pack(side=tk.LEFT)
+        ttk.Button(hdr_f, text="+ New Creator", style="Secondary.TButton",
+                   command=lambda: _add_creator()).pack(side=tk.RIGHT)
+
+        # ── Scrollable list ───────────────────────────────────────────────────
+        border = tk.Frame(dlg, bg=c["border"])
+        border.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 16))
+        canvas = tk.Canvas(border, bg=c["list_bg"], highlightthickness=0)
+        sb     = ttk.Scrollbar(border, command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1, pady=1)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        inner = tk.Frame(canvas, bg=c["list_bg"])
+        win   = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(win, width=e.width))
+        canvas.bind("<Enter>",
+                    lambda e: dlg.bind_all("<MouseWheel>",
+                        lambda ev: canvas.yview_scroll(-1*(ev.delta//120), "units")))
+        canvas.bind("<Leave>", lambda e: dlg.unbind_all("<MouseWheel>"))
+
+        def _rebuild():
+            for w in inner.winfo_children():
+                w.destroy()
+            for idx, creator in enumerate(self._store.all_creators()):
+                _build_row(idx, creator)
+
+        def _build_row(idx: int, creator):
+            if idx > 0:
+                tk.Frame(inner, bg=c["border"], height=1).pack(fill=tk.X)
+
+            group = tk.Frame(inner, bg=c["list_bg"])
+            group.pack(fill=tk.X)
+
+            # ── Creator header row ────────────────────────────────────────────
+            row = tk.Frame(group, bg=c["panel"])
+            row.pack(fill=tk.X)
+
+            # name — click to edit inline
+            name_var = tk.StringVar(value=creator.name)
+            name_lbl = tk.Label(row, textvariable=name_var, bg=c["panel"],
+                                fg=c["text"], font=(*FONTS["body"], "bold"),
+                                anchor="w", cursor="xterm")
+            name_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                          padx=(14, 8), pady=8)
+
+            def _start_edit(lbl=name_lbl, var=name_var, cid=creator.id, r=row):
+                lbl.pack_forget()
+                ent = ttk.Entry(r, textvariable=var, font=FONTS["body"])
+                ent.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                         padx=(14, 8), pady=5, ipady=3)
+                ent.focus_set()
+                ent.select_range(0, tk.END)
+
+                def _commit(ev=None):
+                    new_name = var.get().strip()
+                    if new_name:
+                        self._store.rename_creator(cid, new_name)
+                    ent.pack_forget()
+                    cr = self._store.get_creator(cid)
+                    var.set(cr.name if cr else var.get())
+                    lbl.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                             padx=(14, 8), pady=8)
+                    self._refresh_creator_list()
+
+                ent.bind("<Return>",   _commit)
+                ent.bind("<FocusOut>", _commit)
+                ent.bind("<Escape>",   lambda e: _commit())
+
+            name_lbl.bind("<Button-1>", lambda e: _start_edit())
+
+            def _delete(cid=creator.id, name=creator.name):
+                n   = len(self._store.get_entries_for_creator(cid))
+                msg = (f'Delete "{name}"?\n\nIts {n} entr{"y" if n==1 else "ies"} '
+                       f'will become unassigned.' if n else f'Delete "{name}"?')
+                if messagebox.askyesno("Delete Creator", msg, parent=dlg):
+                    self._store.remove_creator(cid)
+                    _rebuild()
+                    self._refresh_creator_list()
+
+            ttk.Button(row, text="Delete", style="Secondary.TButton",
+                       command=_delete).pack(side=tk.RIGHT, padx=(0, 14), pady=6)
+
+            # ── Entries under creator ─────────────────────────────────────────
+            entries = self._store.get_entries_for_creator(creator.id)
+            for entry in entries:
+                cfg     = PLATFORMS.get(entry.platform, {})
+                display = entry.handle.split("|")[0] if "|" in entry.handle else entry.handle
+                erow = tk.Frame(group, bg=c["list_bg"])
+                erow.pack(fill=tk.X)
+                tk.Frame(erow, bg=c["border"], width=1).pack(side=tk.LEFT, fill=tk.Y)
+                plat_lbl = tk.Label(erow, text=cfg.get("label", entry.platform),
+                                    bg=c["list_bg"], fg=c["text_dim"],
+                                    font=FONTS["small"], width=8, anchor="w")
+                plat_lbl.pack(side=tk.LEFT, padx=(10, 6), pady=5)
+                tk.Label(erow, text=display, bg=c["list_bg"], fg=c["text"],
+                         font=FONTS["body"], anchor="w"
+                         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            if not entries:
+                tk.Label(group, text="No accounts", bg=c["list_bg"],
+                         fg=c["text_dim"], font=FONTS["small"], anchor="w"
+                         ).pack(fill=tk.X, padx=14, pady=4)
+
+        def _add_creator():
+            name = simpledialog.askstring("New Creator", "Creator name:",
+                                          parent=dlg)
+            if name and name.strip():
+                self._store.add_creator(name.strip())
+                _rebuild()
+                self._refresh_creator_list()
+
+        _rebuild()
+
+    def _refresh_creator_list(self):
+        if self._creators_inner is None:
+            return
+        for w in self._creators_inner.winfo_children():
+            w.destroy()
+        self._drag_headers    = []
+        self._drag_hdr_colors = {}
+        self._drag_active_hdr = None
+        c        = THEME_COLORS[self._current_theme]
+        creators = self._store.all_creators()
+        entries  = self._store.all_entries()
+
+        if not entries:
+            tk.Label(self._creators_inner,
+                     text=self._t("creator.empty_hint"),
+                     bg=c["list_bg"], fg=c["text_dim"],
+                     font=FONTS["small"]).pack(padx=12, pady=20)
             return
 
-        # ── Douyin ────────────────────────────────────────────────────────────
-        # Accept: profile URL or bare sec_uid
-        m = re.search(r"/user/([^/?#]+)", raw_input)
-        sec_uid = m.group(1) if m else raw_input
-        if not sec_uid:
+        # ── Creator groups ────────────────────────────────────────────────────
+        for creator in creators:
+            c_entries = self._store.get_entries_for_creator(creator.id)
+            self._render_creator_section(creator, c_entries, self._creators_inner)
+
+        # ── Unassigned entries ────────────────────────────────────────────────
+        unassigned = self._store.get_unassigned_entries()
+        if unassigned:
+            self._render_unassigned_section(unassigned, self._creators_inner)
+
+    # ── Hover helper ───────────────────────────────────────────────────────────
+    def _bind_row_hover(self, root_frame: tk.Frame,
+                        bg_widgets: list, on_enter, on_leave):
+        """Bind enter/leave to root_frame and all its children.
+        on_leave fires only when cursor genuinely leaves root_frame."""
+        def _leave(event):
+            w = self.winfo_containing(event.x_root, event.y_root)
+            node = w
+            while node is not None:
+                if node is root_frame:
+                    return   # still inside — child-to-child transition
+                node = getattr(node, "master", None)
+            on_leave()
+        root_frame.bind("<Enter>", lambda e: on_enter())
+        root_frame.bind("<Leave>", _leave)
+        for child in bg_widgets:
+            child.bind("<Enter>", lambda e: on_enter())
+            child.bind("<Leave>", _leave)
+
+    def _render_creator_section(self, creator, entries, parent):
+        c = THEME_COLORS[self._current_theme]
+
+        # Single-entry creators: bordered card, no group header
+        if len(entries) == 1:
+            group = tk.Frame(parent, bg=c["border"])
+            group.pack(fill=tk.X, padx=8, pady=(16, 8))
+            gf = tk.Frame(group, bg=c["list_bg"])
+            gf.pack(fill=tk.X, padx=2, pady=2)
+            self._render_entry_row(entries[0], creator.id, gf)
             return
 
-        self._entry_hint.set("Resolving username…")
-        self._users_entry.configure(state="disabled")
+        # Bordered group container
+        group = tk.Frame(parent, bg=c["border"],
+                         highlightthickness=0)
+        group.pack(fill=tk.X, padx=8, pady=(16, 8))
+        inner = tk.Frame(group, bg=c["panel"])
+        inner.pack(fill=tk.X, padx=2, pady=2)
 
-        def fetch():
-            nickname = None
+        hdr = tk.Frame(inner, bg=c["panel"])
+        hdr.pack(fill=tk.X)
+
+        # Thick accent bar
+        tk.Frame(hdr, bg=c["accent"], width=4).pack(side=tk.LEFT, fill=tk.Y)
+
+        name_lbl = tk.Label(hdr, text=creator.name,
+                            bg=c["panel"], fg=c["text"],
+                            font=FONTS["heading"], anchor="w")
+        name_lbl.pack(side=tk.LEFT, padx=(10, 4), pady=6, fill=tk.X, expand=True)
+
+        # ⋯ — invisible until hover
+        more = tk.Label(hdr, text="⋯", cursor="hand2",
+                        bg=c["panel"], fg=c["panel"],
+                        font=FONTS["body"])
+        more.pack(side=tk.RIGHT, padx=(0, 10))
+
+        def _rename():
+            self._rename_creator_dialog(creator.id)
+
+        def _delete():
+            if messagebox.askyesno(
+                    "Delete Group",
+                    f'Remove "{creator.name}"?\n\nIts entries become unassigned.',
+                    parent=self):
+                self._store.remove_creator(creator.id)
+                self._refresh_creator_list()
+
+        def _show_ctx(x, y):
+            m = tk.Menu(self, tearoff=0)
+            m.add_command(label="Rename", command=_rename)
+            m.add_separator()
+            m.add_command(label="Delete group", command=_delete)
             try:
-                cookies: dict[str, str] = {}
-                for line in Path(cfg["cookies_file"]).read_text(
-                        encoding="utf-8").splitlines():
-                    if line.startswith("#") or not line.strip():
-                        continue
-                    fields = line.split("\t")
-                    if len(fields) >= 7:
-                        cookies[fields[5].strip()] = fields[6].strip()
+                m.tk_popup(x, y)
+            finally:
+                m.grab_release()
 
-                cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
-                params = urllib.parse.urlencode({
-                    "sec_user_id":    sec_uid,
-                    "aid":            "6383",
-                    "cookie_enabled": "true",
-                    "platform":       "PC",
-                })
-                hdrs = {
-                    "Cookie":     cookie_header,
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                  "Chrome/120.0.0.0 Safari/537.36",
-                    "Referer":    "https://www.douyin.com/",
-                    "Accept":     "application/json",
-                }
-                ctx  = ssl.create_default_context()
-                conn = http.client.HTTPSConnection("www.douyin.com", timeout=10, context=ctx)
-                conn.request("GET",
-                             f"/aweme/v1/web/user/profile/other/?{params}",
-                             headers=hdrs)
-                resp = conn.getresponse()
-                data = _json.loads(resp.read())
-                conn.close()
-                nickname = (data.get("user") or {}).get("nickname") or None
-            except Exception:
-                pass
+        def _enter():
+            for w in (hdr, name_lbl):
+                w.configure(bg=c["hover"])
+            more.configure(bg=c["hover"], fg=c["text_dim"])
 
-            display = nickname if nickname else sec_uid
-            raw     = f"{display}|{sec_uid}"
+        def _leave():
+            for w in (hdr, name_lbl):
+                w.configure(bg=c["panel"])
+            more.configure(bg=c["panel"], fg=c["panel"])
 
-            def apply():
-                self._users_entry.configure(state="normal")
-                self._entry_hint.set(orig_hint)
-                if raw not in self._user_raw.get(pid, []):
-                    self._user_raw.setdefault(pid, []).append(raw)
-                    self._append_user_row(pid, display)
-                    self._save_users(pid)
+        self._bind_row_hover(hdr, [name_lbl, more], _enter, _leave)
+        for w in (hdr, name_lbl, more):
+            w.bind("<Button-3>", lambda e: _show_ctx(e.x_root, e.y_root))
+        more.bind("<Button-1>", lambda e: _show_ctx(e.x_root, e.y_root))
 
-            self.after(0, apply)
+        self._drag_headers.append((hdr, creator.id))
+        self._drag_hdr_colors[id(hdr)] = c["panel"]
 
-        threading.Thread(target=fetch, daemon=True).start()
+        if entries:
+            gf = tk.Frame(inner, bg=c["list_bg"])
+            gf.pack(fill=tk.X, padx=0, pady=(0, 0))
+            for entry in entries:
+                self._render_entry_row(entry, creator.id, gf)
+        else:
+            # Empty group — dim placeholder, still a valid drag target
+            tk.Label(inner,
+                     text="No entries — drag one here",
+                     bg=c["list_bg"], fg=c["text_dim"],
+                     font=FONTS["small"], anchor="w"
+                     ).pack(fill=tk.X, padx=(24, 0), pady=4)
 
-    def _remove_user(self):
-        pid = self._selected_pid()
-        idx = self._sel_row
-        if idx is None:
+    def _render_unassigned_section(self, entries, parent):
+        c = THEME_COLORS[self._current_theme]
+
+        hdr = tk.Frame(parent, bg=c["panel"])
+        hdr.pack(fill=tk.X, padx=0, pady=(4, 0))
+        tk.Frame(hdr, bg=c["border"], width=2).pack(side=tk.LEFT, fill=tk.Y)
+        lbl = tk.Label(hdr, text=self._t("creator.unassigned"),
+                       bg=c["panel"], fg=c["text_dim"],
+                       font=(*FONTS["small"], "bold"), anchor="w")
+        lbl.pack(side=tk.LEFT, padx=(8, 0), pady=3)
+
+        self._drag_headers.append((hdr, None))
+        self._drag_hdr_colors[id(hdr)] = c["panel"]
+
+        gf = tk.Frame(parent, bg=c["list_bg"])
+        gf.pack(fill=tk.X, padx=8, pady=(2, 4))
+        for entry in entries:
+            self._render_entry_row(entry, None, gf)
+
+    def _render_entry_row(self, entry, current_creator_id, parent):
+        c   = THEME_COLORS[self._current_theme]
+        cfg = PLATFORMS.get(entry.platform, {})
+        display = entry.handle.split("|")[0] if "|" in entry.handle else entry.handle
+
+        card = tk.Frame(parent, bg=c["list_bg"], cursor="fleur",
+                        highlightthickness=0)
+        card.pack(fill=tk.X, padx=0, pady=0)
+
+        # ── Layout: icon left (full height) | platform + name right ─────
+        body = tk.Frame(card, bg=c["list_bg"], cursor="fleur")
+        body.pack(fill=tk.X, padx=8, pady=8)
+
+        img_icon = getattr(self, "_platform_icons_lg", {}).get(entry.platform)
+        if img_icon:
+            pill_bg = cfg.get("icon_bg", cfg.get("color", c["border"]))
+            icon_w = tk.Label(body, image=img_icon, bg=pill_bg,
+                              bd=0, highlightthickness=0, cursor="fleur",
+                              padx=4, pady=4)
+        else:
+            pill_bg = cfg.get("color", c["border"])
+            icon_w = tk.Label(body, text=f" {cfg.get('icon', entry.platform)} ",
+                              bg=pill_bg, fg="#ffffff",
+                              font=FONTS["heading"], cursor="fleur")
+        icon_w.pack(side=tk.LEFT, padx=(0, 10), anchor="center")
+
+        # Right column: platform label + name
+        right = tk.Frame(body, bg=c["list_bg"], cursor="fleur")
+        right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        top = tk.Frame(right, bg=c["list_bg"], cursor="fleur")
+        top.pack(fill=tk.X)
+
+        plat_lbl = tk.Label(top, text=cfg.get("label", entry.platform),
+                            bg=c["list_bg"], fg=c["text_dim"],
+                            font=FONTS["small"], anchor="w", cursor="fleur")
+        plat_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        more = tk.Label(top, text="⋯", cursor="hand2",
+                        bg=c["list_bg"], fg=c["list_bg"], font=FONTS["small"])
+        more.pack(side=tk.RIGHT)
+
+        name_lbl = tk.Label(right, text=display,
+                            bg=c["list_bg"], fg=c["text"],
+                            font=FONTS["body"], anchor="w", cursor="fleur")
+        name_lbl.pack(fill=tk.X)
+
+        # Context menu
+        def _remove():
+            if messagebox.askyesno("Remove",
+                                   f'Remove "{display}" from tracking?',
+                                   parent=self):
+                self._store.remove_entry(entry.id)
+                self._refresh_creator_list()
+
+        def _create_creator_for_entry():
+            new_c = self._store.add_creator(display)
+            self._store.assign_entry(entry.id, new_c.id)
+            self._refresh_creator_list()
+
+        def _show_ctx(x, y):
+            m = tk.Menu(self, tearoff=0)
+            creators = self._store.all_creators()
+            if creators:
+                sub = tk.Menu(m, tearoff=0)
+                for cr in creators:
+                    sub.add_command(
+                        label=cr.name,
+                        command=lambda cid=cr.id: (
+                            self._store.assign_entry(entry.id, cid),
+                            self._refresh_creator_list()))
+                if current_creator_id is not None:
+                    sub.add_separator()
+                    sub.add_command(
+                        label=self._t("creator.unassigned"),
+                        command=lambda: (
+                            self._store.assign_entry(entry.id, None),
+                            self._refresh_creator_list()))
+                m.add_cascade(label="Move to", menu=sub)
+                m.add_separator()
+            m.add_command(label=f'Create creator "{display}"',
+                          command=_create_creator_for_entry)
+            m.add_separator()
+            m.add_command(label="Remove", command=_remove)
+            try:
+                m.tk_popup(x, y)
+            finally:
+                m.grab_release()
+
+        # Hover
+        bg_ws = [card, body, top, right, plat_lbl, name_lbl, more]
+
+        def _enter():
+            for w in bg_ws:
+                w.configure(bg=c["hover"])
+            more.configure(fg=c["text_dim"])
+
+        def _leave():
+            for w in bg_ws:
+                w.configure(bg=c["list_bg"])
+            more.configure(fg=c["list_bg"])
+
+        self._bind_row_hover(card, [body, top, right, icon_w, plat_lbl, name_lbl, more],
+                             _enter, _leave)
+        for w in (card, body, top, right, icon_w, plat_lbl, name_lbl, more):
+            w.bind("<Button-3>", lambda e: _show_ctx(e.x_root, e.y_root))
+        more.bind("<Button-1>", lambda e: _show_ctx(e.x_root, e.y_root))
+
+        # Drag bindings
+        for w in (card, body, top, right, icon_w, plat_lbl, name_lbl):
+            w.bind("<ButtonPress-1>",
+                   lambda e, eid=entry.id, d=display: self._drag_press(e, eid, d))
+            w.bind("<B1-Motion>",
+                   lambda e, eid=entry.id, d=display: self._drag_motion(e, eid, d))
+            w.bind("<ButtonRelease-1>",
+                   lambda e, eid=entry.id: self._drag_release(e, eid))
+
+    def _refresh_creator_list_theme(self):
+        if self._creators_canvas is None:
             return
-        raws = self._user_raw.get(pid, [])
-        if 0 <= idx < len(raws):
-            raws.pop(idx)
-            row = self._user_rows.get(pid, []).pop(idx)
-            row.destroy()
-            self._sel_row = None
-            self._save_users(pid)
+        c = THEME_COLORS[self._current_theme]
+        self._creators_canvas.configure(bg=c["list_bg"])
+        self._creators_inner.configure(bg=c["list_bg"])
+        if hasattr(self, "_accounts_border"):
+            self._accounts_border.configure(bg=c["border"])
+        self._refresh_creator_list()
 
-    def _save_users(self, pid: str | None = None):
-        if pid is None:
-            pid = self._selected_pid()
-        path  = PLATFORMS[pid]["users_file"]
-        lines = self._user_raw.get(pid, [])
-        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # ── Drag-and-drop ──────────────────────────────────────────────────────────
+    def _drag_press(self, event, entry_id: str, display: str):
+        self._drag_entry_id  = entry_id
+        self._drag_display   = display
+        self._drag_start_xy  = (event.x_root, event.y_root)
+        self._drag_ghost     = None
+        self._drag_target_id = _DRAG_NONE
+
+    def _drag_motion(self, event, entry_id: str, display: str):
+        if self._drag_entry_id != entry_id:
+            return
+        dx = abs(event.x_root - self._drag_start_xy[0])
+        dy = abs(event.y_root - self._drag_start_xy[1])
+        if dx < 5 and dy < 5:
+            return  # not yet a drag — wait for threshold
+
+        if self._drag_ghost is None:
+            self._drag_create_ghost(display)
+
+        if self._drag_ghost:
+            self._drag_ghost.geometry(
+                f"+{event.x_root + 14}+{event.y_root + 6}")
+
+        self._drag_update_target(event.x_root, event.y_root)
+
+    def _drag_release(self, event, entry_id: str):
+        if self._drag_entry_id != entry_id:
+            return
+
+        # Tear down ghost
+        if self._drag_ghost:
+            try:
+                self._drag_ghost.destroy()
+            except tk.TclError:
+                pass
+            self._drag_ghost = None
+
+        self._drag_clear_highlight()
+
+        target = self._drag_target_id
+        self._drag_entry_id  = None
+        self._drag_target_id = _DRAG_NONE
+
+        if target is _DRAG_NONE:
+            return  # never dragged far enough — treat as click, do nothing
+
+        entry = self._store.get_entry(entry_id)
+        if entry is None:
+            return
+        if entry.creator_id == target:
+            return  # dropped on own section — no-op
+
+        self._store.assign_entry(entry_id, target)
+        self._refresh_creator_list()
+
+    def _drag_create_ghost(self, display: str):
+        c = THEME_COLORS[self._current_theme]
+        ghost = tk.Toplevel(self)
+        ghost.overrideredirect(True)
+        ghost.attributes("-topmost", True)
+        try:
+            ghost.attributes("-alpha", 0.88)
+        except tk.TclError:
+            pass
+        frame = tk.Frame(ghost, bg=c["accent"], padx=10, pady=5)
+        frame.pack()
+        tk.Label(frame, text=f"  {display}  ",
+                 bg=c["accent"], fg="#ffffff",
+                 font=FONTS["body"]).pack()
+        self._drag_ghost = ghost
+
+    def _drag_update_target(self, x_root: int, y_root: int):
+        found_hdr = None
+        found_cid = _DRAG_NONE
+
+        widget = self.winfo_containing(x_root, y_root)
+        while widget is not None and widget is not self:
+            for hdr, cid in self._drag_headers:
+                if widget is hdr:
+                    found_hdr = hdr
+                    found_cid = cid
+                    break
+            if found_hdr is not None:
+                break
+            widget = getattr(widget, "master", None)
+
+        if found_hdr is self._drag_active_hdr:
+            self._drag_target_id = found_cid
+            return  # same header — nothing changed
+
+        self._drag_clear_highlight()
+
+        if found_hdr is not None:
+            c = THEME_COLORS[self._current_theme]
+            found_hdr.configure(bg=c["accent"])
+            for child in found_hdr.winfo_children():
+                if isinstance(child, tk.Label):
+                    child.configure(bg=c["accent"], fg="#ffffff")
+                elif isinstance(child, tk.Frame):
+                    child.configure(bg=c["accent"])
+            self._drag_active_hdr = found_hdr
+
+        self._drag_target_id = found_cid
+
+    def _drag_clear_highlight(self):
+        hdr = self._drag_active_hdr
+        if hdr is None:
+            return
+        c   = THEME_COLORS[self._current_theme]
+        orig = self._drag_hdr_colors.get(id(hdr), c["panel"])
+        # Determine whether this is a named-creator header (accent bar) or unassigned
+        is_unassigned = any(
+            cid is None and hdr is h for h, cid in self._drag_headers)
+        text_fg = c["text_dim"] if is_unassigned else c["text"]
+        try:
+            hdr.configure(bg=orig)
+            for child in hdr.winfo_children():
+                if isinstance(child, tk.Label):
+                    child.configure(bg=orig, fg=text_fg)
+                elif isinstance(child, tk.Frame):
+                    child.configure(bg=orig)
+        except tk.TclError:
+            pass
+        self._drag_active_hdr = None
+
+    def _hide_accounts_form(self):
+        pass  # no longer used; kept for any stale call sites
+
+    def _show_add_creator_dialog(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("New Creator")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        self._centre_dialog(dlg, 320, 118)
+        outer = ttk.Frame(dlg, padding=16)
+        outer.pack(fill=tk.BOTH, expand=True)
+        var = tk.StringVar()
+        entry = ttk.Entry(outer, textvariable=var, font=FONTS["body"])
+        entry.pack(fill=tk.X, ipady=3, pady=(0, 10))
+        btn_row = ttk.Frame(outer)
+        btn_row.pack(fill=tk.X)
+        def _create():
+            name = var.get().strip()
+            if not name:
+                return
+            self._store.add_creator(name)
+            dlg.destroy()
+            self._refresh_creator_list()
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(
+            side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btn_row, text="Create", style="Accent.TButton",
+                   command=_create).pack(side=tk.RIGHT)
+        entry.bind("<Return>", lambda _: _create())
+        entry.bind("<Escape>", lambda _: dlg.destroy())
+        entry.focus_set()
+
+    def _rename_creator_dialog(self, creator_id: str):
+        creator = self._store.get_creator(creator_id)
+        if not creator:
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("Rename Creator")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._centre_dialog(dlg, 520, 150)
+
+        outer = ttk.Frame(dlg, padding=24)
+        outer.pack(fill=tk.BOTH, expand=True)
+        name_var = tk.StringVar(value=creator.name)
+        entry = ttk.Entry(outer, textvariable=name_var, font=FONTS["body"])
+        entry.pack(fill=tk.X, pady=(0, 12))
+        dlg.after(1, lambda: (entry.focus_set(), entry.selection_clear(), entry.icursor(tk.END)))
+
+        def _apply():
+            n = name_var.get().strip()
+            if n:
+                self._store.rename_creator(creator_id, n)
+                dlg.destroy()
+                self._refresh_creator_list()
+
+        entry.bind("<Return>", lambda _: _apply())
+        btn_row = ttk.Frame(outer)
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btn_row, text="Rename", command=_apply).pack(side=tk.RIGHT)
+
+    def _assign_entry_dialog(self, entry_id: str, display: str):
+        """Show a popup to move an entry to a creator (or unassign it)."""
+        creators = self._store.all_creators()
+        if not creators:
+            messagebox.showinfo("No Creators",
+                                'No creators exist yet. Create one first with "+ Add Creator".',
+                                parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f'Assign "{display}"')
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._centre_dialog(dlg, 380, min(100 + len(creators) * 36 + 60, 600))
+
+        outer = ttk.Frame(dlg, padding=16)
+        outer.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(outer, text=f'Move  "{display}"  to:',
+                  font=FONTS["body"]).pack(anchor="w", pady=(0, 8))
+
+        canvas = tk.Canvas(outer, highlightthickness=0,
+                           height=min(len(creators) * 36, 400))
+        sb = ttk.Scrollbar(outer, command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(canvas)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def _pick(cid):
+            self._store.assign_entry(entry_id, cid)
+            dlg.destroy()
+            self._refresh_creator_list()
+
+        def _unassign():
+            self._store.assign_entry(entry_id, None)
+            dlg.destroy()
+            self._refresh_creator_list()
+
+        for creator in creators:
+            ttk.Button(inner, text=creator.name,
+                       command=lambda cid=creator.id: _pick(cid)
+                       ).pack(fill=tk.X, pady=1)
+
+        ttk.Separator(outer, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        ttk.Button(outer, text="Unassign (move to Unassigned)",
+                   command=_unassign).pack(fill=tk.X)
+
+    def _show_add_entry_form(self):
+        pass  # replaced by the persistent bottom bar in _build_accounts
+        return
+        import re as _re, http.client, ssl, urllib.parse, json as _json
+        c   = THEME_COLORS[self._current_theme]
+        frm = None  # dead code below kept for reference
+
+        # ── Row 1: handle + platform badge + creator picker + buttons ─────────
+        row1 = tk.Frame(frm, bg=c["panel"])
+        row1.pack(fill=tk.X, padx=10, pady=(8, 2))
+
+        handle_var   = tk.StringVar()
+        handle_entry = ttk.Entry(row1, textvariable=handle_var, font=FONTS["body"])
+        handle_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3, padx=(0, 6))
+
+        detected_var = tk.StringVar(value="")
+        ttk.Label(row1, textvariable=detected_var,
+                  font=(*FONTS["small"], "bold"),
+                  foreground=c["accent"]).pack(side=tk.LEFT, padx=(0, 6))
+
+        _UNASSIGNED = "— Unassigned —"
+        creators    = self._store.all_creators()
+        cb_values   = [_UNASSIGNED] + [cr.name for cr in creators]
+        creator_var = tk.StringVar(value=_UNASSIGNED)
+        creator_cb  = ttk.Combobox(row1, textvariable=creator_var,
+                                   values=cb_values, state="readonly",
+                                   font=FONTS["body"], width=14)
+        creator_cb.pack(side=tk.LEFT, padx=(0, 6))
+
+        add_btn = ttk.Button(row1, text="Add", style="Accent.TButton")
+        add_btn.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(row1, text="✕", width=2,
+                   command=self._hide_accounts_form).pack(side=tk.LEFT)
+
+        # ── Row 2: status hint ────────────────────────────────────────────────
+        row2 = tk.Frame(frm, bg=c["panel"])
+        row2.pack(fill=tk.X, padx=10, pady=(0, 8))
+        status_var = tk.StringVar(
+            value="Paste a URL from X, Bilibili, or Douyin — or type an X username")
+        ttk.Label(row2, textvariable=status_var,
+                  font=FONTS["small"], foreground="#888888").pack(side=tk.LEFT)
+
+        # ── Platform inference ────────────────────────────────────────────────
+        _URL_DETECT = [
+            (_re.compile(r"x\.com|twitter\.com"),       "x"),
+            (_re.compile(r"bilibili\.com|b23\.tv"),      "bilibili"),
+            (_re.compile(r"douyin\.com|iesdouyin\.com"), "douyin"),
+        ]
+        _pid_state: list = [None]
+
+        def _infer_pid(text: str) -> "str | None":
+            for pat, pid in _URL_DETECT:
+                if pat.search(text):
+                    return pid
+            if _re.match(r'^@?[A-Za-z0-9_]{1,50}$', text):
+                return "x"
+            return None
+
+        def _on_change(*_):
+            raw = handle_var.get().strip()
+            pid = _infer_pid(raw)
+            _pid_state[0] = pid
+            detected_var.set(PLATFORMS[pid]["label"] if pid else "")
+            if pid:
+                status_var.set({
+                    "x":        self._t("entry.hint_x"),
+                    "bilibili": self._t("entry.hint_bilibili"),
+                    "douyin":   self._t("entry.hint_douyin"),
+                }.get(pid, ""))
+            else:
+                status_var.set(
+                    "Paste a URL from X, Bilibili, or Douyin — or type an X username")
+
+        handle_var.trace_add("write", _on_change)
+
+        # ── Add logic ─────────────────────────────────────────────────────────
+        def _resolve_cid() -> "str | None":
+            sel = creator_var.get()
+            if sel == _UNASSIGNED:
+                return None
+            for cr in creators:
+                if cr.name == sel:
+                    return cr.id
+            return None
+
+        def _finish(handle: str):
+            self._store.add_entry(_pid_state[0], handle, _resolve_cid())
+            self._hide_accounts_form()
+            self._refresh_creator_list()
+
+        def _add():
+            raw = handle_var.get().strip()
+            pid = _pid_state[0]
+            if not raw:
+                return
+            if pid is None:
+                status_var.set("⚠  Could not detect platform — paste a full URL.")
+                return
+            cfg = PLATFORMS[pid]
+
+            if pid == "x":
+                _finish(raw.lstrip("@"))
+
+            elif pid == "bilibili":
+                m   = _re.search(r"space\.bilibili\.com/(\d+)", raw)
+                uid = m.group(1) if m else raw
+                if not uid.isdigit():
+                    status_var.set("⚠  Enter a UID or bilibili space URL.")
+                    return
+                status_var.set("Resolving name…")
+                add_btn.configure(state=tk.DISABLED)
+                handle_entry.configure(state="disabled")
+
+                def _fetch_bl():
+                    nick = None; error = None
+                    try:
+                        ctx  = ssl.create_default_context()
+                        conn = http.client.HTTPSConnection(
+                            "api.bilibili.com", timeout=10, context=ctx)
+                        conn.request("GET", f"/x/web-interface/card?mid={uid}",
+                                     headers={"User-Agent": "Mozilla/5.0",
+                                              "Referer": "https://www.bilibili.com/",
+                                              "Accept": "application/json"})
+                        data = _json.loads(conn.getresponse().read())
+                        conn.close()
+                        if data.get("code") != 0:
+                            error = f"UID not found (code {data.get('code')})."
+                        else:
+                            nick = (data.get("data") or {}).get("card", {}).get("name")
+                    except Exception as exc:
+                        error = str(exc)
+
+                    def _apply():
+                        handle_entry.configure(state="normal")
+                        add_btn.configure(state=tk.NORMAL)
+                        if error:
+                            status_var.set(f"⚠  {error}")
+                        else:
+                            _finish(f"{nick or uid}|{uid}")
+                    self.after(0, _apply)
+
+                threading.Thread(target=_fetch_bl, daemon=True).start()
+
+            elif pid == "douyin":
+                m       = _re.search(r"/user/([^/?#]+)", raw)
+                sec_uid = m.group(1) if m else raw
+                status_var.set("Resolving name…")
+                add_btn.configure(state=tk.DISABLED)
+                handle_entry.configure(state="disabled")
+
+                def _fetch_dy():
+                    nick = None
+                    try:
+                        cookies: dict[str, str] = {}
+                        cf = Path(cfg["cookies_file"])
+                        if cf.exists():
+                            for line in cf.read_text(encoding="utf-8").splitlines():
+                                if line.startswith("#") or not line.strip():
+                                    continue
+                                fields = line.split("\t")
+                                if len(fields) >= 7:
+                                    cookies[fields[5].strip()] = fields[6].strip()
+                        params = urllib.parse.urlencode({
+                            "sec_user_id": sec_uid, "aid": "6383",
+                            "cookie_enabled": "true", "platform": "PC",
+                        })
+                        ctx  = ssl.create_default_context()
+                        conn = http.client.HTTPSConnection(
+                            "www.douyin.com", timeout=10, context=ctx)
+                        conn.request("GET",
+                                     f"/aweme/v1/web/user/profile/other/?{params}",
+                                     headers={
+                                         "Cookie": "; ".join(
+                                             f"{k}={v}" for k, v in cookies.items()),
+                                         "User-Agent": "Mozilla/5.0",
+                                         "Referer": "https://www.douyin.com/",
+                                         "Accept": "application/json",
+                                     })
+                        data = _json.loads(conn.getresponse().read())
+                        conn.close()
+                        nick = (data.get("user") or {}).get("nickname") or None
+                    except Exception:
+                        pass
+
+                    def _apply():
+                        handle_entry.configure(state="normal")
+                        add_btn.configure(state=tk.NORMAL)
+                        _finish(f"{nick or sec_uid}|{sec_uid}")
+                    self.after(0, _apply)
+
+                threading.Thread(target=_fetch_dy, daemon=True).start()
+
+        add_btn.configure(command=_add)
+        handle_entry.bind("<Return>", lambda _: _add())
+        handle_entry.bind("<Escape>", lambda _: self._hide_accounts_form())
+
+        frm.pack(fill=tk.X, padx=12, pady=(0, 4))
+        handle_entry.focus_set()
 
     # ── Settings ───────────────────────────────────────────────────────────────
     def _build_settings(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
+        c      = THEME_COLORS[self._current_theme]
+        canvas = tk.Canvas(parent, highlightthickness=0, bg=c["bg"])
         sb     = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._settings_canvas = canvas
 
-        outer = ttk.Frame(canvas, padding=(24, 18))
+        outer = tk.Frame(canvas, bg=c["bg"])
         win   = canvas.create_window((0, 0), window=outer, anchor="nw")
 
-        def _on_resize(e):
-            canvas.itemconfig(win, width=e.width)
-        canvas.bind("<Configure>", _on_resize)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        outer.bind("<Configure>",  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        def _on_frame_resize(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        outer.bind("<Configure>", _on_frame_resize)
+        PAD     = 24   # horizontal page margin
+        LBL_W   = 168  # fixed label column width
+        ROW_PAD = 4    # vertical padding per row
 
-        self._reg(
-            ttk.Label(outer, text=self._t("settings.auth_hint"),
-                      font=FONTS["small"], foreground="#888888"),
-            "settings.auth_hint"
-        ).pack(anchor="w", pady=(0, 10))
+        # ── Helpers ───────────────────────────────────────────────────────────
 
-        for pid, cfg in PLATFORMS.items():
-            af = ttk.LabelFrame(outer, text=f"Authentication  —  {cfg['label']}", padding=14)
-            af.pack(fill=tk.X, pady=(0, 10))
-            self._build_auth_section(af, pid, cfg)
+        def _card(title, hint=None):
+            wrapper = tk.Frame(outer, bg=c["border"])
+            wrapper.pack(fill=tk.X, padx=PAD, pady=(0, 8))
+            body = tk.Frame(wrapper, bg=c["panel"])
+            body.pack(fill=tk.X, padx=1, pady=1)
+            # header
+            tk.Label(body, text=title, font=FONTS["heading"],
+                     bg=c["panel"], fg=c["text"]
+                     ).pack(anchor="w", padx=16, pady=(10, 0))
+            tk.Frame(body, bg=c["border"], height=1).pack(fill=tk.X, pady=(8, 0))
+            if hint:
+                tk.Label(body, text=hint, font=FONTS["small"],
+                         bg=c["panel"], fg=c["text_dim"],
+                         wraplength=540, justify="left",
+                         ).pack(anchor="w", padx=16, pady=(6, 0))
+            content = tk.Frame(body, bg=c["panel"])
+            content.pack(fill=tk.X, padx=16, pady=(6, 10))
+            content.columnconfigure(0, minsize=LBL_W, weight=0)
+            content.columnconfigure(1, weight=0)   # inputs don't expand by default
+            content.columnconfigure(2, weight=1)   # spacer
+            content.columnconfigure(3, weight=0)   # action
+            return content
 
-        def _options_section(title_key, rows):
-            f = ttk.LabelFrame(outer, text=self._t(title_key), padding=14)
-            self._reg(f, title_key)
-            f.pack(fill=tk.X, pady=(0, 10))
-            for r, (label_key, attr, default, lo, hi) in enumerate(rows):
-                lbl = ttk.Label(f, text=self._t(label_key))
-                self._reg(lbl, label_key)
-                lbl.grid(row=r, column=0, sticky="w", padx=6, pady=8)
-                saved = self._load_setting(attr, default)
-                sp = ttk.Spinbox(f, from_=lo, to=hi, increment=1, width=12, font=FONTS["body"])
-                sp.set(saved)
-                sp.grid(row=r, column=1, sticky="w", padx=14, pady=8)
-                sp.bind("<<Increment>>", lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
-                sp.bind("<<Decrement>>", lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
-                sp.bind("<FocusOut>",    lambda _e, a=attr, w=sp: self._save_setting(a, w.get()))
-                setattr(self, attr, sp)
+        def _lbl(parent, text, key=None):
+            w = tk.Label(parent, text=text, font=FONTS["body"],
+                         bg=c["panel"], fg=c["text"], anchor="w")
+            if key:
+                self._reg(w, key)
+            return w
 
-        _options_section("settings.parallel_opts", [
-            ("settings.workers", "parallel_workers", 1, 1, 10),
-        ])
+        def _row(parent, row, label, ctrl, action=None, label_key=None):
+            """col0=label, col1=control, col2=spacer, col3=action"""
+            (label if isinstance(label, tk.Widget)
+             else _lbl(parent, label, label_key)
+             ).grid(row=row, column=0, sticky="w", pady=ROW_PAD)
+            ctrl.grid(row=row, column=1, sticky="w", padx=(14, 0), pady=ROW_PAD)
+            if action:
+                action.grid(row=row, column=3, sticky="e", pady=ROW_PAD)
 
-        # ── Download location ──────────────────────────────────────────────────
-        dlf = ttk.LabelFrame(outer, text=self._t("settings.dl_location"), padding=14)
-        self._reg(dlf, "settings.dl_location")
-        dlf.pack(fill=tk.X, pady=(0, 10))
+        def _sep(parent, row):
+            tk.Frame(parent, bg=c["border"], height=1).grid(
+                row=row, column=0, columnspan=4, sticky="ew", pady=(3, 3))
 
-        path_row = ttk.Frame(dlf)
-        path_row.pack(fill=tk.X)
+        def _spinbox(parent, attr, default, lo, hi, increment=1, w=6):
+            saved = self._load_setting(attr, default)
+            sp = ttk.Spinbox(parent, from_=lo, to=hi, increment=increment,
+                             width=w, font=FONTS["body"])
+            sp.set(saved)
+            sp.bind("<<Increment>>", lambda _e, a=attr, s=sp: self._save_setting(a, s.get()))
+            sp.bind("<<Decrement>>", lambda _e, a=attr, s=sp: self._save_setting(a, s.get()))
+            sp.bind("<FocusOut>",    lambda _e, a=attr, s=sp: self._save_setting(a, s.get()))
+            sp.bind("<MouseWheel>",  lambda e: "break")
+            sp.bind("<FocusIn>",     lambda _e, s=sp: s.after(50, s.selection_clear))
+            return sp
 
+        # top margin
+        tk.Frame(outer, bg=c["bg"], height=14).pack()
+
+        # ── Authentication ────────────────────────────────────────────────────
+        ac = _card("Authentication", hint=self._t("settings.auth_hint"))
+
+        for i, (pid, cfg) in enumerate(PLATFORMS.items()):
+            if i > 0:
+                _sep(ac, i * 2 - 1)
+
+            cookies_path = Path(cfg["cookies_file"])
+            if cookies_path.exists():
+                st_text  = f"✓  {cookies_path.name}  ({cookies_path.stat().st_size // 1024} KB)"
+                st_color = "#4ec94e"
+            else:
+                st_text  = "✗  not found"
+                st_color = "#ff6b6b"
+
+            st_var = tk.StringVar(value=st_text)
+            self._cookie_status[pid] = st_var
+            st_lbl = tk.Label(ac, textvariable=st_var, font=FONTS["small"],
+                              fg=st_color, bg=c["panel"], anchor="w")
+
+            def _update_st(p=cookies_path, v=st_var, l=st_lbl):
+                if p.exists():
+                    v.set(f"✓  {p.name}  ({p.stat().st_size // 1024} KB)")
+                    l.configure(fg="#4ec94e")
+                else:
+                    v.set("✗  not found")
+                    l.configure(fg="#ff6b6b")
+
+            plat_lbl = tk.Label(ac, text=cfg["label"], font=(*FONTS["body"], "bold"),
+                                bg=c["panel"], fg=c["text"], anchor="w")
+            import_btn = ttk.Button(ac, text="Import", style="Secondary.TButton",
+                                    command=lambda p=pid, u=_update_st:
+                                        (self._browse_cookies(p), u()))
+            plat_lbl.grid(row=i * 2, column=0, sticky="w", pady=ROW_PAD)
+            st_lbl.grid(   row=i * 2, column=1, columnspan=2, sticky="w",
+                           padx=(14, 0), pady=ROW_PAD)
+            import_btn.grid(row=i * 2, column=3, sticky="e", pady=ROW_PAD)
+
+        # ── Download Settings ─────────────────────────────────────────────────
+        dc = _card("Download Settings")
+
+        workers_sp = _spinbox(dc, "parallel_workers", 1, 1, 10, w=6)
+        setattr(self, "parallel_workers", workers_sp)
+        _row(dc, 0, self._t("settings.workers"), workers_sp, label_key="settings.workers")
+
+        _sep(dc, 1)
+
+        # Download location — entry expands full width across cols 1-3
         self._dl_path_var = tk.StringVar(value=str(self._get_download_dir()))
-        ttk.Entry(path_row, textvariable=self._dl_path_var, font=FONTS["body"]).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        loc_lbl = _lbl(dc, self._t("settings.dl_location"), "settings.dl_location")
+        loc_lbl.grid(row=2, column=0, sticky="w", pady=ROW_PAD)
+
+        loc_entry = ttk.Entry(dc, textvariable=self._dl_path_var, font=FONTS["body"])
+        loc_entry.grid(row=2, column=1, columnspan=2, sticky="ew",
+                       padx=(14, 6), pady=ROW_PAD)
+        dc.columnconfigure(2, weight=1)
 
         def _browse_dl():
             folder = filedialog.askdirectory(
@@ -1115,43 +2375,69 @@ class App(tk.Tk):
                 Path(DOWNLOAD_PATH_FILE).parent.mkdir(parents=True, exist_ok=True)
                 Path(DOWNLOAD_PATH_FILE).write_text(folder, encoding="utf-8")
 
-        self._reg(ttk.Button(path_row, text=self._t("btn.browse"), command=_browse_dl),
-                  "btn.browse").pack(side=tk.LEFT)
+        self._reg(ttk.Button(dc, text=self._t("btn.browse"),
+                             style="Secondary.TButton", command=_browse_dl),
+                  "btn.browse").grid(row=2, column=3, sticky="e", pady=ROW_PAD)
 
         # ── Appearance ────────────────────────────────────────────────────────
-        apf = ttk.LabelFrame(outer, text=self._t("settings.appearance"), padding=14)
-        self._reg(apf, "settings.appearance")
-        apf.pack(fill=tk.X, pady=(0, 10))
+        apc = _card(self._t("settings.appearance"))
 
-        self._reg(ttk.Label(apf, text=self._t("label.theme")),
-                  "label.theme").grid(row=0, column=0, sticky="w", padx=6, pady=8)
+        # Theme: label | current state (dim) | action button
+        def _theme_state_str():
+            return "Dark mode" if self._current_theme == "dark" else "Light mode"
+
+        theme_state_var = tk.StringVar(value=_theme_state_str())
+        theme_state_lbl = tk.Label(apc, textvariable=theme_state_var,
+                                   font=FONTS["body"], bg=c["panel"], fg=c["text_dim"],
+                                   anchor="w")
         self._theme_toggle_btn = ttk.Button(
-            apf,
+            apc,
             text=self._t("btn.switch_light") if self._current_theme == "dark"
                  else self._t("btn.switch_dark"),
-            command=self._toggle_theme,
+            style="Secondary.TButton",
+            command=lambda: (self._toggle_theme(),
+                             theme_state_var.set(_theme_state_str())),
         )
-        self._theme_toggle_btn.grid(row=0, column=1, sticky="w", padx=14, pady=8)
+        _lbl(apc, self._t("label.theme"), "label.theme").grid(
+            row=0, column=0, sticky="w", pady=ROW_PAD)
+        theme_state_lbl.grid(row=0, column=1, sticky="w", padx=(14, 0), pady=ROW_PAD)
+        self._theme_toggle_btn.grid(row=0, column=3, sticky="e", pady=ROW_PAD)
 
-        self._reg(ttk.Label(apf, text=self._t("label.language")),
-                  "label.language").grid(row=1, column=0, sticky="w", padx=6, pady=8)
-        lang_cb = ttk.Combobox(apf, state="readonly", width=12,
+        lang_cb = ttk.Combobox(apc, state="readonly", width=14,
                                font=FONTS["body"], values=["English", "中文"])
         lang_cb.set("English" if self._lang == "en" else "中文")
-        lang_cb.grid(row=1, column=1, sticky="w", padx=14, pady=8)
         lang_cb.bind("<<ComboboxSelected>>",
                      lambda _e: self._set_lang("en" if lang_cb.get() == "English" else "zh"))
+        lang_cb.bind("<MouseWheel>", lambda e: "break")
+        lang_cb.bind("<<ComboboxSelected>>",
+                     lambda _e: lang_cb.after(50, lang_cb.selection_clear), add="+")
+        _row(apc, 1, self._t("label.language"), lang_cb, label_key="label.language")
 
-        dbf = ttk.LabelFrame(outer, text=self._t("settings.database"), padding=14)
-        self._reg(dbf, "settings.database")
-        dbf.pack(fill=tk.X)
+        # ── Database ──────────────────────────────────────────────────────────
+        dbc = _card(self._t("settings.database"))
+
+        db_hint = _lbl(dbc, self._t("settings.db_hint"))
+        db_hint.configure(font=FONTS["small"], fg=c["text_dim"])
+        self._reg(db_hint, "settings.db_hint")
+        db_hint.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
         self._reg(
-            ttk.Label(dbf, text=self._t("settings.db_hint"),
-                      font=FONTS["small"], foreground="#888888"),
-            "settings.db_hint").pack(anchor="w", pady=(0, 8))
-        self._reg(ttk.Button(dbf, text=self._t("btn.reset_db"), style="Danger.TButton",
-                             command=self._reset_db),
-                  "btn.reset_db").pack(anchor="w")
+            ttk.Button(dbc, text=self._t("btn.reset_db"),
+                       style="Danger.TButton", command=self._reset_db),
+            "btn.reset_db").grid(row=1, column=0, sticky="w", pady=(0, 2))
+
+        # ── About (dim footer) ────────────────────────────────────────────────
+        import webbrowser as _wb
+        about_f = tk.Frame(outer, bg=c["bg"])
+        about_f.pack(fill=tk.X, padx=PAD, pady=(0, 24))
+        tk.Label(about_f,
+                 text=f"Archiver  v{APP_VERSION}  ·  gallery-dl · yt-dlp · f2",
+                 font=FONTS["small"], bg=c["bg"], fg=c["text_dim"]).pack(side=tk.LEFT)
+        self._reg(
+            ttk.Button(about_f, text=self._t("btn.github"), style="Secondary.TButton",
+                       command=lambda: _wb.open(
+                           "https://github.com/GH-Acho177/media-downloader")),
+            "btn.github").pack(side=tk.RIGHT)
 
     def _build_about_panel(self, parent):
         import webbrowser
@@ -1165,7 +2451,7 @@ class App(tk.Tk):
         f = ttk.Frame(bg, padding=(40, 32))
         f.place(relx=0.5, rely=0.38, anchor="center")
 
-        ttk.Label(f, text="Media Downloader", font=FONTS["title"]).pack()
+        ttk.Label(f, text="Archiver", font=FONTS["title"]).pack()
         ttk.Label(f, text=f"v{APP_VERSION}",
                   font=FONTS["body"], foreground="#888888").pack(pady=(6, 4))
 
@@ -1218,7 +2504,10 @@ class App(tk.Tk):
 
     def _reset_db(self):
         import json as _json
-        pid   = self._selected_pid()
+        # Pick platform via simple dialog
+        pid = self._pick_platform_dialog("Reset DB — choose platform")
+        if pid is None:
+            return
         label = PLATFORMS[pid]["label"]
         if not messagebox.askyesno(
                 "Reset DB",
@@ -1256,7 +2545,7 @@ class App(tk.Tk):
                 except Exception:
                     pass
 
-        self._refresh_from_date(pid)
+        self._refresh_from_date()
         messagebox.showinfo("Reset DB", f"All state for {label} cleared.")
 
     # ── Log helpers ────────────────────────────────────────────────────────────
@@ -1272,44 +2561,62 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def _open_downloads(self):
-        folder = (self._get_download_dir() / self._selected_pid()).resolve()
+        folder = self._get_download_dir().resolve()
         folder.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["explorer", str(folder)])
 
     # ── DB viewer ──────────────────────────────────────────────────────────────
     # ── Post URL download ──────────────────────────────────────────────────────
     def _download_post_url(self):
-        pid = self._selected_pid()
-        cfg = PLATFORMS[pid]
-
         dlg = tk.Toplevel(self)
         dlg.title("Download Post URL")
         dlg.resizable(False, False)
         dlg.grab_set()
-        self._centre_dialog(dlg, 680, 230)
+        self._centre_dialog(dlg, 680, 200)
 
-        ttk.Label(dlg, text=f"Platform: {cfg['label']}",
-                  font=FONTS["heading"]).grid(
-            row=0, column=0, columnspan=2, padx=20, pady=(18, 8), sticky="w")
-        ttk.Label(dlg, text="Post URL:").grid(row=1, column=0, padx=20, pady=6, sticky="w")
+        ttk.Label(dlg, text="Post URL:").grid(row=0, column=0, padx=20, pady=(18, 6), sticky="w")
         url_var   = tk.StringVar()
         url_entry = ttk.Entry(dlg, textvariable=url_var, width=62, font=FONTS["body"])
-        url_entry.grid(row=1, column=1, padx=(0, 20), pady=6, sticky="ew")
+        url_entry.grid(row=0, column=1, padx=(0, 20), pady=(18, 6), sticky="ew")
         dlg.columnconfigure(1, weight=1)
         url_entry.focus_set()
 
+        hint_var = tk.StringVar(value="Paste a URL from X, Bilibili, or Douyin")
+        ttk.Label(dlg, textvariable=hint_var, font=FONTS["small"]).grid(
+            row=1, column=0, columnspan=2, padx=20, sticky="w")
+
         btn_row = ttk.Frame(dlg)
-        btn_row.grid(row=2, column=0, columnspan=2, pady=(12, 18))
+        btn_row.grid(row=2, column=0, columnspan=2, pady=(14, 18))
+
+        _URL_PLATFORM = (
+            ("x.com",         "x"),
+            ("twitter.com",   "x"),
+            ("bilibili.com",  "bilibili"),
+            ("b23.tv",        "bilibili"),
+            ("douyin.com",    "douyin"),
+            ("iesdouyin.com", "douyin"),
+        )
+
+        def _detect_pid(url: str) -> "str | None":
+            for domain, p in _URL_PLATFORM:
+                if domain in url:
+                    return p
+            return None
 
         def start():
             url = url_var.get().strip()
             if not url:
                 return
+            pid = _detect_pid(url)
+            if pid is None:
+                hint_var.set("⚠ Could not detect platform from URL.")
+                return
+            cfg = PLATFORMS[pid]
             if not Path(cfg["cookies_file"]).exists():
                 messagebox.showwarning(
                     "No cookies",
                     f"Cookies not found for {cfg['label']}.\n"
-                    f"Go to Settings → Authentication.")
+                    "Go to Settings → Authentication.")
                 return
             dlg.destroy()
             self._run_single_post(pid, url)
@@ -1328,6 +2635,8 @@ class App(tk.Tk):
         self.stop_flag.clear()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.stop_btn.configure(style="Danger.TButton")
+        self.progress.configure(mode="indeterminate")
         self.progress.start(12)
         self.status_var.set("Downloading post…")
 
@@ -1415,22 +2724,10 @@ class App(tk.Tk):
         if self.running:
             return
 
-        pid = self._selected_pid()
-        cfg = PLATFORMS[pid]
-
-        if not Path(cfg["cookies_file"]).exists():
+        if not self._store.all_entries():
             messagebox.showwarning(
                 "Cannot start",
-                f"No cookies found for {cfg['label']}.\n\n"
-                "Go to Settings → Authentication to add cookies.")
-            return
-
-        all_users = self._user_raw.get(pid, [])
-        if not all_users:
-            messagebox.showwarning(
-                "Cannot start",
-                f"No users added for {cfg['label']}.\n\n"
-                "Go to the Users tab to add some.")
+                "No entries added yet.\n\nGo to the Accounts tab and add entries.")
             return
 
         import datetime as _dtv
@@ -1439,18 +2736,16 @@ class App(tk.Tk):
             if n < 0:
                 raise ValueError
         except (ValueError, TypeError):
-            messagebox.showwarning("Invalid value",
-                                   "Days must be a whole number ≥ 0.")
+            messagebox.showwarning("Invalid value", "Days must be a whole number ≥ 0.")
             return
 
-        # 0 = no date filter; stop when archive hits an already-downloaded post
         from_date = (
             (_dtv.date.today() - _dtv.timedelta(days=n)).isoformat()
             if n > 0 else ""
         )
 
-        selected  = self._pick_accounts(pid, all_users)
-        if not selected:
+        selected_ids = self._pick_creators()
+        if selected_ids is None:
             return
 
         self._pending_run_result = None
@@ -1458,6 +2753,8 @@ class App(tk.Tk):
         self.stop_flag.clear()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.stop_btn.configure(style="Danger.TButton")
+        self.progress.configure(mode="indeterminate")
         self.progress.start(12)
         self.status_var.set("Running…")
 
@@ -1465,158 +2762,202 @@ class App(tk.Tk):
 
         threading.Thread(
             target=self._worker,
-            args=(pid,
+            args=(selected_ids,
                   self.mode_var.get() == "full",
-                  2,  # sleep_req — gallery-dl default
-                  5,  # sleep_user — gallery-dl default
-                  selected,
                   from_date,
                   workers),
             daemon=True,
         ).start()
 
-    def _pick_accounts(self, pid: str, all_users: list) -> list:
-        """Show account picker dialog. Returns selected user entries or [] if cancelled."""
-        cfg = PLATFORMS[pid]
+    def _pick_platform_dialog(self, title: str = "Choose platform") -> "str | None":
+        """Simple modal with one button per platform. Returns pid or None."""
         c   = THEME_COLORS[self._current_theme]
-
         dlg = tk.Toplevel(self)
-        dlg.title(f"Select accounts — {cfg['label']}")
+        dlg.title(title)
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
+        self._centre_dialog(dlg, 320, 140)
 
-        self._centre_dialog(dlg, 900, min(72 * len(all_users) + 300, 1000))
+        chosen: list = [None]
 
-        outer = ttk.Frame(dlg, padding=24)
+        ttk.Label(dlg, text="Select platform:", font=FONTS["heading"]).pack(pady=(16, 10))
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack()
+        for pid, cfg in PLATFORMS.items():
+            p = pid  # capture
+            ttk.Button(btn_row, text=cfg["label"],
+                       command=lambda p=p: (chosen.__setitem__(0, p), dlg.destroy())
+                       ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(dlg, text="Cancel", command=dlg.destroy).pack(pady=10)
+
+        dlg.wait_window()
+        return chosen[0]
+
+    def _pick_creators(self) -> "list[str] | None":
+        """Show creator picker. Returns list of creator_ids (+ UNASSIGNED_ID if chosen),
+        or None if cancelled."""
+        from src.creator_store import UNASSIGNED_ID
+        c        = THEME_COLORS[self._current_theme]
+        creators = self._store.all_creators()
+        unassigned = self._store.get_unassigned_entries()
+
+        rows: list[tuple] = []  # (BooleanVar, id, name, [platform_ids])
+        for cr in creators:
+            entries = self._store.get_entries_for_creator(cr.id)
+            if entries:
+                pids = list(dict.fromkeys(e.platform for e in entries))  # unique, ordered
+                rows.append((tk.BooleanVar(value=True), cr.id, cr.name, pids))
+        if unassigned:
+            pids = list(dict.fromkeys(e.platform for e in unassigned))
+            rows.append((tk.BooleanVar(value=True), UNASSIGNED_ID,
+                         self._t("creator.unassigned"), pids))
+
+        if not rows:
+            messagebox.showwarning("Nothing to download",
+                                   "All entries are missing cookies or\n"
+                                   "no entries exist.")
+            return None
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Select Creators")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._centre_dialog(dlg, 680, min(80 * len(rows) + 220, 900))
+
+        outer = ttk.Frame(dlg, padding=20)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(outer, text=cfg["label"], font=FONTS["heading"]).pack(
-            anchor=tk.W, pady=(0, 4))
-        ttk.Label(outer, text="Choose accounts for this run:",
-                  font=FONTS["small"], foreground="#888888").pack(
-            anchor=tk.W, pady=(0, 14))
+        # ── Top bar: search + All/None ─────────────────────────────────────────
+        top_bar = tk.Frame(outer, bg=str(ttk.Style().lookup("TFrame", "background")) or c["bg"])
+        top_bar.pack(fill=tk.X, pady=(0, 8))
 
-        # Scrollable checkbox list — use theme background so ttk.Checkbutton blends in
+        search_var = tk.StringVar()
+        search_ent = ttk.Entry(top_bar, textvariable=search_var, font=FONTS["body"])
+        search_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3, padx=(0, 8))
+
+        # All / None — small utility buttons, right-aligned
+        ttk.Button(top_bar, text="None", style="Utility.TButton",
+                   command=lambda: _set_all(False)).pack(side=tk.RIGHT)
+        ttk.Button(top_bar, text="All",  style="Utility.TButton",
+                   command=lambda: _set_all(True)).pack(side=tk.RIGHT, padx=(0, 4))
+
         _list_bg = str(ttk.Style().lookup("TFrame", "background")) or c["bg"]
+        lf = tk.Frame(outer, bg=_list_bg, highlightthickness=1,
+                      highlightbackground=c["border"])
+        lf.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
 
-        list_frame = tk.Frame(outer, bg=_list_bg,
-                              highlightthickness=1,
-                              highlightbackground=c["border"])
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
-
-        canvas = tk.Canvas(list_frame, bg=_list_bg,
-                           highlightthickness=0, width=750,
-                           height=min(64 * len(all_users), 620))
-        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas = tk.Canvas(lf, bg=_list_bg, highlightthickness=0,
+                           height=min(70 * len(rows), 600))
+        sb = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         inner = tk.Frame(canvas, bg=_list_bg)
-        _win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfig(_win_id, width=e.width))
+        _wid  = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(_wid, width=e.width))
 
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        inner.bind_all("<MouseWheel>", _on_mousewheel)
-        dlg.bind("<Destroy>", lambda _e: inner.unbind_all("<MouseWheel>"))
+        # Mousewheel — bind_all while cursor is over the list
+        def _on_wheel(e):
+            canvas.yview_scroll(-1 * (e.delta // 120), "units")
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        dlg.bind("<Destroy>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        # Clicking the list area removes cursor from search entry
+        def _blur_search(_e=None):
+            dlg.focus_set()
+        canvas.bind("<Button-1>", _blur_search)
+        inner.bind("<Button-1>",  _blur_search)
+        dlg.after(50, dlg.focus_set)   # also hide cursor on dialog open
 
         _accent = c["accent"]
         _hover  = c["hover"]
         _fg     = c["text"]
+        # (bv, cid, bar, chk, row_frame, name)
+        var_rows: list[tuple] = []
+        _icon_refs: list = []   # keep PhotoImage refs alive for dialog lifetime
 
-        vars_ = []
-        for user in all_users:
-            v    = tk.BooleanVar(value=False)
-            name = user.split("|")[0]
-
+        for (bv, cid, name, pids) in rows:
             row = tk.Frame(inner, bg=_list_bg, cursor="hand2")
             row.pack(fill=tk.X)
-
-            # Accent bar on left — visible when selected
-            bar = tk.Frame(row, bg=_list_bg, width=4)
+            bar = tk.Frame(row, bg=_accent if bv.get() else _list_bg, width=4)
             bar.pack(side=tk.LEFT, fill=tk.Y)
-
-            lbl = tk.Label(row, text=name, font=FONTS["small"],
+            lbl = tk.Label(row, text=name, font=FONTS["body"],
                            bg=_list_bg, fg=_fg, anchor="w")
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=14, pady=11)
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=10)
 
-            # Check mark on right — visible when selected
-            chk = tk.Label(row, text="", font=FONTS["body"],
-                           bg=_list_bg, fg=_accent, width=2, anchor="center")
-            chk.pack(side=tk.RIGHT, padx=12, pady=11)
+            # Platform icons — image if available, else short text badge
+            icon_frame = tk.Frame(row, bg=_list_bg)
+            icon_frame.pack(side=tk.LEFT, padx=8)
+            for pid in pids:
+                img = getattr(self, "_platform_icons", {}).get(pid)
+                if img:
+                    _icon_refs.append(img)
+                    cfg_p = PLATFORMS[pid]
+                    pill_bg = cfg_p.get("icon_bg", cfg_p.get("color", c["border"]))
+                    tk.Label(icon_frame, image=img, bg=pill_bg,
+                             relief=tk.FLAT, bd=0).pack(side=tk.LEFT, padx=2)
+                else:
+                    tk.Label(icon_frame,
+                             text=PLATFORMS[pid]["icon"],
+                             font=FONTS["small"], bg=_list_bg,
+                             fg=c["text_dim"]).pack(side=tk.LEFT, padx=2)
 
-            def _toggle(_e, _v=v, _bar=bar, _chk=chk):
+            def _toggle(_e, _v=bv, _bar=bar):
+                dlg.focus_set()
                 _v.set(not _v.get())
-                if _v.get():
-                    _bar.configure(bg=_accent)
-                    _chk.configure(text="✓")
-                else:
-                    _bar.configure(bg=str(_bar.master.cget("bg")))
-                    _chk.configure(text="")
+                _bar.configure(bg=_accent if _v.get() else _list_bg)
 
-            def _enter(_e, _row=row, _bar=bar, _lbl=lbl, _chk=chk, _v=v):
-                for w in (_row, _lbl, _chk): w.configure(bg=_hover)
-                if not _v.get(): _bar.configure(bg=_hover)
-
-            def _leave(_e, _row=row, _bar=bar, _lbl=lbl, _chk=chk, _v=v):
-                for w in (_row, _lbl, _chk): w.configure(bg=_list_bg)
-                if not _v.get(): _bar.configure(bg=_list_bg)
-
-            for w in (row, lbl, chk):
+            for w in (row, lbl, icon_frame):
                 w.bind("<Button-1>", _toggle)
-                w.bind("<Enter>",    _enter)
-                w.bind("<Leave>",    _leave)
+            for child in icon_frame.winfo_children():
+                child.bind("<Button-1>", _toggle)
+            var_rows.append((bv, cid, bar, None, row, name))
 
-            vars_.append((v, user, bar, chk))
-
-        def _set_all(checked: bool):
-            for _v, _, _bar, _chk in vars_:
-                _v.set(checked)
-                if checked:
-                    _bar.configure(bg=_accent)
-                    _chk.configure(text="✓")
+        # ── Search filter ──────────────────────────────────────────────────────
+        def _filter(*_):
+            q = search_var.get().strip().lower()
+            for _bv, _cid, _bar, _chk, _row, _name in var_rows:
+                if q in _name.lower():
+                    _row.pack(fill=tk.X)
                 else:
-                    _bar.configure(bg=_list_bg)
-                    _chk.configure(text="")
+                    _row.pack_forget()
+            canvas.configure(scrollregion=canvas.bbox("all"))
 
-        # Select all / clear
-        sel_row = ttk.Frame(outer)
-        sel_row.pack(fill=tk.X, pady=(0, 12))
-        ttk.Button(sel_row, text="All",
-                   command=lambda: _set_all(True)).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(sel_row, text="None",
-                   command=lambda: _set_all(False)).pack(side=tk.LEFT)
+        search_var.trace_add("write", _filter)
 
-        # Result container
-        result: list = []
+        def _set_all(v: bool):
+            q = search_var.get().strip().lower()
+            for _bv, _, _bar, _chk, _row, _name in var_rows:
+                if q and q not in _name.lower():
+                    continue  # only affect visible rows
+                _bv.set(v)
+                _bar.configure(bg=_accent if v else _list_bg)
+
+        result: list[list[str]] = [[]]
 
         def _confirm():
-            chosen = [u for v, u, *_ in vars_ if v.get()]
+            chosen = [cid for bv, cid, *_ in var_rows if bv.get()]
             if not chosen:
-                messagebox.showwarning("No accounts selected",
-                                       "Select at least one account.",
-                                       parent=dlg)
+                messagebox.showwarning("Nothing selected",
+                                       "Select at least one creator.", parent=dlg)
                 return
-            result.extend(chosen)
+            result[0] = chosen
             dlg.destroy()
 
         btn_row = ttk.Frame(outer)
         btn_row.pack(fill=tk.X)
-        ttk.Button(btn_row, text="Cancel",
-                   command=dlg.destroy).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(btn_row, text="Start", style="Accent.TButton",
                    command=_confirm).pack(side=tk.RIGHT)
 
         dlg.bind("<Return>", lambda _e: _confirm())
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
         self.wait_window(dlg)
-        return result
+        return result[0] if result[0] else None
 
     def stop(self):
         self.stop_flag.set()
@@ -1634,8 +2975,17 @@ class App(tk.Tk):
         self._proc   = None
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
+        self.stop_btn.configure(style="Secondary.TButton")
         self.progress.stop()
-        self.status_var.set("Stopped" if self.stop_flag.is_set() else "Done")
+        self.progress.configure(mode="determinate")
+        self.progress["value"] = 0
+        if self._scheduler_thread and self._scheduler_thread.is_alive():
+            self.status_var.set("Idle")
+        else:
+            self.status_var.set("Stopped" if self.stop_flag.is_set() else "Idle")
+        if hasattr(self, "_last_sync_var"):
+            self._last_sync_var.set(self._get_last_sync())
+        self._refresh_auto_pill()
         result = getattr(self, "_pending_run_result", None)
         if result:
             self._pending_run_result = None
@@ -1668,68 +3018,153 @@ class App(tk.Tk):
                 parts.append(f"{fields[5]}={fields[6]}")
         return "; ".join(parts)
 
+    # ── Auto-update scheduler ──────────────────────────────────────────────────
+    def _refresh_auto_pill(self):
+        """Sync the Auto toggle to the current scheduler state."""
+        if not hasattr(self, "_auto_pill"):
+            return
+        c   = THEME_COLORS[self._current_theme]
+        on  = bool(self._scheduler_thread and self._scheduler_thread.is_alive())
+        cv  = self._auto_pill
+        TW, TH, TR = 44, 24, 12
+        cv.delete("all")
+        cv.configure(bg=c["bg"])
+        track = c["accent"] if on else c["border"]
+        cv.create_arc(0, 0, TH, TH, start=90, extent=180, fill=track, outline=track)
+        cv.create_arc(TW - TH, 0, TW, TH, start=270, extent=180, fill=track, outline=track)
+        cv.create_rectangle(TR, 0, TW - TR, TH, fill=track, outline=track)
+        m = 3
+        kx = TW - TH + m if on else m
+        cv.create_oval(kx, m, kx + TH - 2 * m, TH - m, fill="#ffffff", outline="")
+
+    def _toggle_auto_from_dashboard(self):
+        on = bool(self._scheduler_thread and self._scheduler_thread.is_alive())
+        enabled = not on
+        self._save_setting("auto_update_enabled", enabled)
+        if enabled:
+            self._start_scheduler()
+        else:
+            self._stop_scheduler()
+        self._refresh_auto_pill()
+
+    def _start_scheduler(self):
+        self._stop_scheduler()
+        self._scheduler_stop = threading.Event()
+        self._scheduler_thread = threading.Thread(
+            target=self._scheduler_loop,
+            args=(self._scheduler_stop,),
+            daemon=True,
+        )
+        self._scheduler_thread.start()
+        self.progress.configure(mode="determinate")
+        self.progress["value"] = 0
+        self._refresh_auto_pill()
+        self._tick_countdown()
+
+    def _stop_scheduler(self):
+        self._scheduler_stop.set()
+        self._scheduler_thread = None
+        self._scheduler_next_at = 0.0
+        if hasattr(self, "_auto_next_var"):
+            self._auto_next_var.set("")
+        self.progress.configure(mode="determinate")
+        self.progress["value"] = 0
+        self._refresh_auto_pill()
+
+    def _scheduler_loop(self, stop_event: threading.Event):
+        import time as _time
+        while not stop_event.is_set():
+            interval = int(self._load_setting("auto_update_interval", 30)) * 60
+            self._scheduler_next_at = _time.time() + interval
+            if stop_event.wait(timeout=interval):
+                break
+            if not self.running:
+                self.after(0, self._start_auto)
+
+    def _start_auto(self):
+        """Trigger an Update-mode run on all entries without any dialog."""
+        if self.running or not self._store.all_entries():
+            return
+        from src.creator_store import UNASSIGNED_ID
+        all_ids = [c.id for c in self._store.all_creators()]
+        if self._store.get_unassigned_entries():
+            all_ids.append(UNASSIGNED_ID)
+        if not all_ids:
+            return
+        self.running = True
+        self.stop_flag.clear()
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.stop_btn.configure(style="Danger.TButton")
+        self.progress.configure(mode="indeterminate")
+        self.progress.start(12)
+        self.status_var.set("Running…")
+        workers = int(self.parallel_workers.get())
+        threading.Thread(
+            target=self._worker,
+            args=(all_ids, False, "", workers, True),
+            daemon=True,
+        ).start()
+
+    def _tick_countdown(self):
+        """Drive the statusbar bar (determinate) and countdown while auto is idle."""
+        if not (self._scheduler_thread and self._scheduler_thread.is_alive()):
+            return
+        import time as _time
+        interval  = int(self._load_setting("auto_update_interval", 30)) * 60
+        remaining = max(0.0, self._scheduler_next_at - _time.time())
+        elapsed   = max(0.0, interval - remaining)
+        pct = min(100.0, elapsed / interval * 100) if interval > 0 else 0
+        m, s = divmod(int(remaining), 60)
+        if hasattr(self, "_auto_next_var"):
+            self._auto_next_var.set(f"{m}m {s:02d}s")
+        if not self.running:
+            self.progress.configure(mode="determinate")
+            self.progress["value"] = pct
+        self.after(1000, self._tick_countdown)
+
     # ── Worker ─────────────────────────────────────────────────────────────────
-    def _worker(self, pid: str, is_full: bool, sleep_req: int, sleep_user: int,
-                users_override: list | None = None, from_date: str = "", workers: int = 1):
+    def _worker(self, creator_ids: list, is_full: bool,
+                from_date: str = "", workers: int = 1, is_auto: bool = False):
+        from src.creator_store import UNASSIGNED_ID
         import time
         _run_start = time.time()
         _run_key   = str(int(_run_start * 1000))
-        old_stdout = sys.stdout
-        sys.stdout = TextRedirector(self.log, self)
+        old_stdout  = sys.stdout
+        _redirector = TextRedirector(self.log, self)
+        _log_lock   = threading.Lock()
+        sys.stdout  = _ThreadRouter(_redirector)   # always; routes per-thread in parallel
 
         try:
-            cfg          = PLATFORMS[pid]
-            cookies_file = cfg["cookies_file"]
-            users_file   = cfg["users_file"]
             import datetime as _dt
             import re as _re
-            _today    = _dt.date.today().isoformat()
-            base_dir  = self._get_download_dir().resolve() / pid
 
             mode_label = "Full" if is_full else "Update"
-            print(f"Platform : {cfg['label']}")
             print(f"Mode     : {mode_label}")
             if from_date:
                 print(f"From     : {from_date}")
-            print()
+            print(f"Creators : {len(creator_ids)}\n")
 
-            if not Path(cookies_file).exists():
-                print(f"[SKIP] {cookies_file} not found. "
-                      f"Go to Settings → Authentication to add cookies.\n")
-                return
+            sleep_req  = float(self._load_setting("sleep_req",  0))
+            sleep_user = float(self._load_setting("sleep_user", 0))
 
-            if not Path(users_file).exists() or \
-                    not Path(users_file).read_text(encoding="utf-8").strip():
-                print(f"[SKIP] No users in {users_file}.\n")
-                return
+            # Collect handles per platform from selected creators
+            by_pid: dict[str, list[str]] = {}
+            _handle_creator: dict[tuple, str] = {}   # (pid, handle) → safe creator folder
+            for cid in creator_ids:
+                if cid == UNASSIGNED_ID:
+                    src_entries = self._store.get_unassigned_entries()
+                    _cname = "Unassigned"
+                else:
+                    _c = self._store.get_creator(cid)
+                    _cname = _c.name if _c else "Unassigned"
+                _safe_cname = _re.sub(r'[\\/:*?"<>|]', "_", _cname).strip()
+                for e in src_entries:
+                    by_pid.setdefault(e.platform, []).append(e.handle)
+                    _handle_creator[(e.platform, e.handle)] = _safe_cname
 
-            all_users = [u.strip() for u in
-                         Path(users_file).read_text(encoding="utf-8").splitlines()
-                         if u.strip()]
-            users     = users_override if users_override is not None else all_users
-            print(f"Users : {len(users)} / {len(all_users)}\n")
-
-            suspended: list[str] = []
-            _update_results: list[dict] = []
-            downloader = cfg.get("downloader", "gallery-dl")
-
-            def _build_run(extra_user=None, stopped=True):
-                import datetime as _dt2, json as _json2  # noqa: F401 (used below)
-                elapsed = time.time() - _run_start
-                m, s    = divmod(int(elapsed), 60)
-                users_  = list(_update_results)
-                if extra_user:
-                    users_ = users_ + [extra_user]
-                return {
-                    "run_key":  _run_key,
-                    "date":     _dt2.date.today().isoformat(),
-                    "time":     _dt2.datetime.now().strftime("%H:%M"),
-                    "duration": f"{m}m {s}s" if m else f"{s}s",
-                    "platform": pid,
-                    "mode":     "Full" if is_full else "Update",
-                    "stopped":  stopped,
-                    "users":    users_,
-                }
+            _all_update_results: list[dict] = []
+            _all_suspended: dict[str, list[str]] = {}
 
             def _upsert_run(result):
                 import json as _json2
@@ -1749,349 +3184,477 @@ class App(tk.Tk):
                 except Exception:
                     pass
 
-            if downloader == "f2":
-                # ── Parallel f2 (Douyin) ──────────────────────────────────────
-                import json as _json, datetime as _dt
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+            _parallel_plats = len(by_pid) > 1
+            _results_lock   = threading.Lock()
 
-                cookie_str  = self._netscape_to_cookie_str(cookies_file)
-                _config_dir = Path("config").resolve()
-                _state_lock = threading.Lock()   # guards last-run file + result lists
+            def _run_platform(pid, users):
+                """Download all users for one platform; return (results, suspended)."""
+                if self.stop_flag.is_set():
+                    return [], []
 
-                def _f2_task(user, idx):
-                    display      = user.split("|")[0]
-                    safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
-                    sec_uid      = user.split("|")[-1]
-                    today        = _dt.date.today().isoformat()
-                    url          = cfg["url_fn"](user)
-                    tag          = f"[{display}]"
+                cfg          = PLATFORMS[pid]
+                cookies_file = cfg["cookies_file"]
+                _dl_root     = self._get_download_dir().resolve()
+                downloader   = cfg.get("downloader", "gallery-dl")
 
-                    if from_date:
-                        interval = f"{from_date}|{today}"
-                    elif is_full:
-                        interval = "all"
-                    else:
-                        with _state_lock:
-                            lr: dict = {}
-                            if Path(DOUYIN_LAST_RUN).exists():
-                                try:
-                                    lr = _json.loads(
-                                        Path(DOUYIN_LAST_RUN).read_text(encoding="utf-8"))
-                                except Exception:
-                                    pass
-                        last_date = lr.get(sec_uid)
-                        interval  = f"{last_date}|{today}" if last_date else "all"
+                # True whenever this task runs concurrently with others
+                _is_par = workers > 1 or _parallel_plats
 
-                    print(f"\n{'─'*50}")
-                    print(f"[{idx+1}/{len(users)}] {display}")
-                    print(f"{'─'*50}")
-                    print(f"  Interval : {interval}")
+                _local_results:   list[dict] = []
+                _local_suspended: list[str]  = []
 
-                    if self.stop_flag.is_set():
-                        return None, False, user
+                print(f"\n{'═'*60}")
+                print(f"▶  {cfg['label']}  ({len(users)} accounts)")
+                print(f"{'═'*60}\n")
 
-                    _user_dir_f = base_dir / safe_display
-                    _before     = set(_user_dir_f.glob("*")) if _user_dir_f.exists() else set()
-                    _user_dir_f.mkdir(parents=True, exist_ok=True)
-                    print(f"  Save to  : downloads/douyin/{safe_display}")
+                if not Path(cookies_file).exists():
+                    print(f"[SKIP] No cookies for {cfg['label']}.")
+                    return [], []
 
-                    import f2_user as _f2_user
-                    user_suspended = False
+                if downloader == "f2":
+                    # ── f2 (Douyin) ───────────────────────────────────────────
+                    import json as _json, datetime as _dt
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                    def _line_cb(line):
-                        nonlocal user_suspended
-                        if "[error]" in line and any(k in line for k in (
-                                "could not be found", "UserUnavailable", "has been suspended")):
-                            user_suspended = True
+                    cookie_str  = self._netscape_to_cookie_str(cookies_file)
+                    _state_lock = threading.Lock()
 
-                    _outer = sys.stdout
-                    sys.stdout = _LineWriter(
-                        _outer,
-                        prefix=f"  {tag} ",
-                        skip_fn=lambda l: "api.day.app" in l or "Bark notification" in l,
-                        line_cb=_line_cb,
-                    )
-                    try:
-                        asyncio.run(_f2_user.download_user(
-                            url, cookie_str, str(_user_dir_f), interval,
-                            "{create}_{aweme_id}",
-                            stop_check=self.stop_flag.is_set,
-                        ))
-                    finally:
-                        sys.stdout.flush()
-                        sys.stdout = _outer
+                    def _f2_task(user, idx):
+                        display      = user.split("|")[0]
+                        safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
+                        sec_uid      = user.split("|")[-1]
+                        today        = _dt.date.today().isoformat()
+                        url          = cfg["url_fn"](user)
+                        tag          = f"[{display}]"
 
-                    # ── Collect results ───────────────────────────────────────
-                    new_count       = 0
-                    new_names: list[str] = []
-                    corrupt_count   = 0
-                    _user_dl_folder = _user_dir_f.resolve()
+                        if _is_par:
+                            _tbuf = _TaskBuffer()
+                            _out  = _tbuf.write_raw
+                            _outp = lambda t: _tbuf.write_raw(f"  {tag} {t}\n")
+                        else:
+                            _out  = lambda t: print(t)
+                            _outp = lambda t: print(f"  {tag} {t}")
 
-                    if _user_dir_f.exists():
-                        _after    = set(_user_dir_f.glob("*"))
-                        new_files = [p for p in _after
-                                     if p.is_file() and p not in _before]
-                        new_count = len(new_files)
-                        new_names = [f.name for f in new_files]
+                        if from_date:
+                            interval = f"{from_date}|{today}"
+                        elif is_full:
+                            interval = "all"
+                        else:
+                            with _state_lock:
+                                lr: dict = {}
+                                if Path(DOUYIN_LAST_RUN).exists():
+                                    try:
+                                        lr = _json.loads(
+                                            Path(DOUYIN_LAST_RUN).read_text(encoding="utf-8"))
+                                    except Exception:
+                                        pass
+                            last_date = lr.get(sec_uid)
+                            interval  = f"{last_date}|{today}" if last_date else "all"
 
-                    corrupt = self._scan_corrupt(_user_dl_folder)
-                    if corrupt:
-                        corrupt_count = len(corrupt)
-                        for f in corrupt:
-                            print(f"  {tag} ⚠ Corrupt ({f.stat().st_size:,} B): {f.name} — deleted")
-                            f.unlink(missing_ok=True)
-                        hint = "will re-download now" if is_full else "run Full mode to re-download"
-                        print(f"  {tag} → {corrupt_count} corrupt file(s) removed ({hint})")
-                        new_count = max(0, new_count - corrupt_count)
+                        _out(f"\n{'─'*50}")
+                        _out(f"[{idx+1}/{len(users)}] {display}")
+                        _out(f"{'─'*50}")
+                        _out(f"  Interval : {interval}")
 
-                    if user_suspended:
-                        print(f"  ⚠ {display} appears suspended/deleted — will be removed")
-                        return None, True, user
+                        if self.stop_flag.is_set():
+                            if _is_par:
+                                _tbuf.flush_to(_redirector, _log_lock)
+                            return None, False, user
 
-                    # ── Persist last-run date ─────────────────────────────────
-                    if not self.stop_flag.is_set():
-                        with _state_lock:
-                            lr2: dict = {}
-                            if Path(DOUYIN_LAST_RUN).exists():
-                                try:
-                                    lr2 = _json.loads(
-                                        Path(DOUYIN_LAST_RUN).read_text(encoding="utf-8"))
-                                except Exception:
-                                    pass
-                            lr2[sec_uid] = today
-                            Path(DOUYIN_LAST_RUN).write_text(
-                                _json.dumps(lr2, indent=2), encoding="utf-8")
+                        _creator_dir = _handle_creator.get((pid, user), "Unassigned")
+                        _user_dir_f  = _dl_root / _creator_dir / safe_display
+                        _before      = set(_user_dir_f.glob("*")) if _user_dir_f.exists() else set()
+                        _user_dir_f.mkdir(parents=True, exist_ok=True)
+                        _out(f"  Save to  : {_creator_dir}/{safe_display}")
 
-                    return {
-                        "display": display,
-                        "count":   new_count,
-                        "corrupt": corrupt_count,
-                        "files":   new_names,
-                        "folder":  str(_user_dl_folder),
-                    }, False, user
+                        import f2_user as _f2_user
+                        user_suspended = False
 
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = {pool.submit(_f2_task, u, i): u
-                               for i, u in enumerate(users)}
-                    for fut in as_completed(futures):
-                        try:
-                            result, is_susp, user_entry = fut.result()
-                        except Exception as exc:
-                            print(f"\n[ERROR] {exc}")
-                            continue
-                        if is_susp:
-                            suspended.append(user_entry)
-                        elif result:
-                            _update_results.append(result)
-
-            elif downloader == "yt-dlp":
-                # ── yt-dlp (parallel when workers > 1) ───────────────────────
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-                dateafter = from_date.replace("-", "") if from_date else None
-
-                def _ytdlp_task(user, idx):
-                    if self.stop_flag.is_set():
-                        return None, False, user
-                    display      = user.split("|")[0]
-                    safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
-                    tag          = f"[{display}]" if workers > 1 else ""
-                    prefix       = f"  {tag} " if tag else "  "
-                    print(f"\n{'─'*50}")
-                    print(f"[{idx+1}/{len(users)}] {display}")
-                    print(f"{'─'*50}")
-                    url          = cfg["url_fn"](user)
-                    archive_file = str(Path("config") / f"{pid}_downloaded.txt")
-                    user_dir     = base_dir / safe_display
-                    user_dir.mkdir(parents=True, exist_ok=True)
-                    _before      = set(user_dir.glob("*"))
-                    print(f"{prefix}Save to  : {user_dir}")
-                    cmd = [
-                        "yt-dlp",
-                        "--cookies", cookies_file,
-                        *(["--download-archive", archive_file] if not is_full else []),
-                        *(["--dateafter", dateafter] if dateafter else []),
-                        "--sleep-requests", str(sleep_req),
-                        "-o", "%(id)s_%(title)s.%(ext)s",
-                        "-P", str(user_dir),
-                        url,
-                    ]
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, encoding="utf-8", errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                    if workers == 1:
-                        self._proc = proc
-                    with self._procs_lock:
-                        self._procs.append(proc)
-                    user_suspended       = False
-                    _completed_posts: list[str] = []
-                    try:
-                        for line in proc.stdout:
-                            print(f"{prefix}{line}", end="")
-                            if "ERROR" in line and any(k in line for k in (
-                                    "not found", "unavailable", "suspended", "deleted")):
+                        def _line_cb(line):
+                            nonlocal user_suspended
+                            if "[error]" in line and any(k in line for k in (
+                                    "could not be found", "UserUnavailable", "has been suspended")):
                                 user_suspended = True
-                            if '[Merger] Merging formats into "' in line:
-                                _fname = line.split('"')[1] if '"' in line else ""
-                                if _fname:
-                                    _completed_posts.append(Path(_fname).name)
-                            if self.stop_flag.is_set():
-                                proc.terminate()
-                                break
-                        proc.wait()
-                    finally:
+
+                        if _is_par:
+                            _f2_writer = _tbuf.make_prefixed_writer(
+                                prefix=f"  {tag} ",
+                                skip_fn=lambda l: "api.day.app" in l or "Bark notification" in l,
+                                line_cb=_line_cb,
+                            )
+                            sys.stdout.set_target(_f2_writer)
+                            try:
+                                asyncio.run(_f2_user.download_user(
+                                    url, cookie_str, str(_user_dir_f), interval,
+                                    "{create}_{aweme_id}",
+                                    stop_check=self.stop_flag.is_set,
+                                ))
+                            finally:
+                                sys.stdout.clear_target()
+                        else:
+                            _outer = sys.stdout
+                            sys.stdout = _LineWriter(
+                                _outer,
+                                prefix=f"  {tag} ",
+                                skip_fn=lambda l: "api.day.app" in l or "Bark notification" in l,
+                                line_cb=_line_cb,
+                            )
+                            try:
+                                asyncio.run(_f2_user.download_user(
+                                    url, cookie_str, str(_user_dir_f), interval,
+                                    "{create}_{aweme_id}",
+                                    stop_check=self.stop_flag.is_set,
+                                ))
+                            finally:
+                                sys.stdout.flush()
+                                sys.stdout = _outer
+
+                        new_count       = 0
+                        new_names: list[str] = []
+                        corrupt_count   = 0
+                        _user_dl_folder = _user_dir_f.resolve()
+
+                        if _user_dir_f.exists():
+                            _after    = set(_user_dir_f.glob("*"))
+                            new_files = [p for p in _after
+                                         if p.is_file() and p not in _before]
+                            new_count = len(new_files)
+                            new_names = [f.name for f in new_files]
+
+                        corrupt = self._scan_corrupt(_user_dl_folder)
+                        if corrupt:
+                            corrupt_count = len(corrupt)
+                            for f in corrupt:
+                                _outp(f"⚠ Corrupt ({f.stat().st_size:,} B): {f.name} — deleted")
+                                f.unlink(missing_ok=True)
+                            hint = "will re-download now" if is_full else "run Full mode to re-download"
+                            _outp(f"→ {corrupt_count} corrupt file(s) removed ({hint})")
+                            new_count = max(0, new_count - corrupt_count)
+
+                        if user_suspended:
+                            _out(f"  ⚠ {display} appears suspended/deleted — will be removed")
+                            if _is_par:
+                                _tbuf.flush_to(_redirector, _log_lock)
+                            return None, True, user
+
+                        if not self.stop_flag.is_set():
+                            with _state_lock:
+                                lr2: dict = {}
+                                if Path(DOUYIN_LAST_RUN).exists():
+                                    try:
+                                        lr2 = _json.loads(
+                                            Path(DOUYIN_LAST_RUN).read_text(encoding="utf-8"))
+                                    except Exception:
+                                        pass
+                                lr2[sec_uid] = today
+                                Path(DOUYIN_LAST_RUN).write_text(
+                                    _json.dumps(lr2, indent=2), encoding="utf-8")
+
+                        if _is_par:
+                            _tbuf.flush_to(_redirector, _log_lock)
+
+                        return {
+                            "platform": pid,
+                            "display":  display,
+                            "count":    new_count,
+                            "corrupt":  corrupt_count,
+                            "files":    new_names,
+                            "folder":   str(_user_dl_folder),
+                        }, False, user
+
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futures = {pool.submit(_f2_task, u, i): u
+                                   for i, u in enumerate(users)}
+                        for fut in as_completed(futures):
+                            try:
+                                result, is_susp, user_entry = fut.result()
+                            except Exception as exc:
+                                print(f"\n[ERROR] {exc}")
+                                continue
+                            if is_susp:
+                                _local_suspended.append(user_entry)
+                            elif result:
+                                _local_results.append(result)
+
+                elif downloader == "yt-dlp":
+                    # ── yt-dlp (Bilibili) ─────────────────────────────────────
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    dateafter = from_date.replace("-", "") if from_date else None
+
+                    def _ytdlp_task(user, idx):
+                        if self.stop_flag.is_set():
+                            return None, False, user
+                        display      = user.split("|")[0]
+                        safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
+                        prefix       = "  "
+
+                        if _is_par:
+                            _tbuf = _TaskBuffer()
+                            _pr   = lambda t, end="\n": _tbuf.write_raw(f"{t}{end}")
+                        else:
+                            _pr   = lambda t, end="\n": print(t, end=end)
+
+                        _pr(f"\n{'─'*50}")
+                        _pr(f"[{idx+1}/{len(users)}] {display}")
+                        _pr(f"{'─'*50}")
+                        url          = cfg["url_fn"](user)
+                        archive_file = str(Path("config") / f"{pid}_downloaded.txt")
+                        _creator_dir = _handle_creator.get((pid, user), "Unassigned")
+                        user_dir     = _dl_root / _creator_dir / safe_display
+                        user_dir.mkdir(parents=True, exist_ok=True)
+                        _before      = set(user_dir.glob("*"))
+                        _pr(f"{prefix}Save to  : {_creator_dir}/{safe_display}")
+                        cmd = [
+                            "yt-dlp",
+                            "--cookies", cookies_file,
+                            *(["--download-archive", archive_file] if not is_full else []),
+                            *(["--dateafter", dateafter] if dateafter else []),
+                            "--sleep-requests", str(sleep_req),
+                            "-o", "%(id)s_%(title)s.%(ext)s",
+                            "-P", str(user_dir),
+                            url,
+                        ]
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace",
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        if not _is_par:
+                            self._proc = proc
                         with self._procs_lock:
-                            if proc in self._procs:
-                                self._procs.remove(proc)
+                            self._procs.append(proc)
+                        user_suspended       = False
+                        _completed_posts: list[str] = []
+                        try:
+                            for line in proc.stdout:
+                                _pr(f"{prefix}{line}", end="")
+                                if "ERROR" in line and any(k in line for k in (
+                                        "not found", "unavailable", "suspended", "deleted")):
+                                    user_suspended = True
+                                if '[Merger] Merging formats into "' in line:
+                                    _fname = line.split('"')[1] if '"' in line else ""
+                                    if _fname:
+                                        _completed_posts.append(Path(_fname).name)
+                                if self.stop_flag.is_set():
+                                    proc.terminate()
+                                    break
+                            proc.wait()
+                        finally:
+                            with self._procs_lock:
+                                if proc in self._procs:
+                                    self._procs.remove(proc)
 
-                    _user_dl_folder = user_dir.resolve()
-                    if _completed_posts:
-                        new_names = _completed_posts
-                        new_count = len(new_names)
-                    else:
-                        _after     = set(user_dir.glob("*")) if user_dir.exists() else set()
-                        _new_files = {f for f in (_after - _before)
-                                      if not _re.search(r'\.f\d+\.[a-z0-9]+$',
-                                                        f.name, _re.IGNORECASE)}
-                        new_count  = len(_new_files)
-                        new_names  = [f.name for f in _new_files]
+                        _user_dl_folder = user_dir.resolve()
+                        if _completed_posts:
+                            new_names = _completed_posts
+                            new_count = len(new_names)
+                        else:
+                            _after     = set(user_dir.glob("*")) if user_dir.exists() else set()
+                            _new_files = {f for f in (_after - _before)
+                                          if not _re.search(r'\.f\d+\.[a-z0-9]+$',
+                                                            f.name, _re.IGNORECASE)}
+                            new_count  = len(_new_files)
+                            new_names  = [f.name for f in _new_files]
 
-                    corrupt = self._scan_corrupt(_user_dl_folder)
-                    corrupt_count = 0
-                    if corrupt:
-                        corrupt_count = len(corrupt)
-                        for f in corrupt:
-                            print(f"{prefix}⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
-                            f.unlink(missing_ok=True)
-                        hint = "will re-download now" if is_full else "run Full mode to re-download"
-                        print(f"{prefix}→ {corrupt_count} corrupt file(s) removed ({hint})")
-                        new_count = max(0, new_count - corrupt_count)
+                        corrupt = self._scan_corrupt(_user_dl_folder)
+                        corrupt_count = 0
+                        if corrupt:
+                            corrupt_count = len(corrupt)
+                            for f in corrupt:
+                                _pr(f"{prefix}⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
+                                f.unlink(missing_ok=True)
+                            hint = "will re-download now" if is_full else "run Full mode to re-download"
+                            _pr(f"{prefix}→ {corrupt_count} corrupt file(s) removed ({hint})")
+                            new_count = max(0, new_count - corrupt_count)
 
-                    if user_suspended:
-                        print(f"{prefix}⚠ {display} appears suspended/deleted — will be removed")
-                        return None, True, user
+                        if user_suspended:
+                            _pr(f"{prefix}⚠ {display} appears suspended/deleted — will be removed")
+                            if _is_par:
+                                _tbuf.flush_to(_redirector, _log_lock)
+                            return None, True, user
 
-                    return {
-                        "display": display,
-                        "count":   new_count,
-                        "corrupt": corrupt_count,
-                        "files":   new_names,
-                        "folder":  str(_user_dl_folder),
-                    }, False, user
+                        if _is_par:
+                            _tbuf.flush_to(_redirector, _log_lock)
 
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futs = {pool.submit(_ytdlp_task, u, i): u
-                            for i, u in enumerate(users)}
-                    for i, fut in enumerate(as_completed(futs)):
-                        result, is_susp, user = fut.result()
-                        if is_susp:
-                            suspended.append(user)
-                        elif result:
-                            _update_results.append(result)
-                            _upsert_run(_build_run())
-                        if workers == 1 and not self.stop_flag.is_set() and i < len(users) - 1:
+                        return {
+                            "platform": pid,
+                            "display":  display,
+                            "count":    new_count,
+                            "corrupt":  corrupt_count,
+                            "files":    new_names,
+                            "folder":   str(_user_dl_folder),
+                        }, False, user
+
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futs = {pool.submit(_ytdlp_task, u, i): u
+                                for i, u in enumerate(users)}
+                        for i, fut in enumerate(as_completed(futs)):
+                            result, is_susp, user = fut.result()
+                            if is_susp:
+                                _local_suspended.append(user)
+                            elif result:
+                                _local_results.append(result)
+                            if not _is_par and not self.stop_flag.is_set() and i < len(users) - 1:
+                                print(f"\nWaiting {sleep_user}s…")
+                                time.sleep(sleep_user)
+
+                else:
+                    # ── gallery-dl (X / Twitter) — sequential per user ────────
+                    for i, user in enumerate(users):
+                        if self.stop_flag.is_set():
+                            break
+
+                        display      = user.split("|")[0]
+                        safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
+
+                        if _is_par:
+                            _tbuf = _TaskBuffer()
+                            _pr   = lambda t, end="\n": _tbuf.write_raw(f"{t}{end}")
+                        else:
+                            _pr   = lambda t, end="\n": print(t, end=end)
+
+                        _pr(f"\n{'─'*50}")
+                        _pr(f"[{i+1}/{len(users)}] {display}")
+                        _pr(f"{'─'*50}")
+
+                        url          = cfg["url_fn"](user)
+                        archive_file = str(Path("config") / f"{pid}_downloaded.db")
+                        _creator_dir = _handle_creator.get((pid, user), "Unassigned")
+                        user_dir     = _dl_root / _creator_dir / safe_display
+                        user_dir.mkdir(parents=True, exist_ok=True)
+                        _gdl_before  = set(user_dir.glob("*"))
+                        _pr(f"  Save to  : {_creator_dir}/{safe_display}")
+                        cmd = [
+                            GDL,
+                            "--cookies", cookies_file,
+                            *(["--download-archive", archive_file] if not is_full else []),
+                            *(["-o", f"extractor.date-min={from_date}T00:00:00"] if from_date else []),
+                            "--sleep-request", str(sleep_req),
+                            "-D", str(user_dir),
+                            url,
+                        ]
+                        gdl_proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace",
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        if not _is_par:
+                            self._proc = gdl_proc
+                        with self._procs_lock:
+                            self._procs.append(gdl_proc)
+                        user_suspended = False
+                        for line in gdl_proc.stdout:
+                            if "api.day.app" in line or "Bark notification" in line:
+                                continue
+                            _pr(line, end="")
+                            if "[error]" in line and any(k in line for k in (
+                                    "could not be found", "UserUnavailable", "has been suspended")):
+                                user_suspended = True
+                            if not is_full and "# " in line:
+                                gdl_proc.terminate()
+                                _pr("\n  → Up to date.")
+                                break
+                        gdl_proc.wait()
+                        with self._procs_lock:
+                            if gdl_proc in self._procs:
+                                self._procs.remove(gdl_proc)
+
+                        _gdl_after  = set(user_dir.glob("*")) if user_dir.exists() else set()
+                        _new_files  = _gdl_after - _gdl_before
+                        new_count   = len(_new_files)
+                        new_names   = [f.name for f in _new_files]
+                        _user_dl_folder = user_dir.resolve()
+
+                        corrupt = self._scan_corrupt(_user_dl_folder)
+                        corrupt_count = 0
+                        if corrupt:
+                            corrupt_count = len(corrupt)
+                            for f in corrupt:
+                                _pr(f"  ⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
+                                f.unlink(missing_ok=True)
+                            hint = "will re-download now" if is_full else "run Full mode to re-download"
+                            _pr(f"  → {corrupt_count} corrupt file(s) removed ({hint})")
+                            new_count = max(0, new_count - corrupt_count)
+
+                        if user_suspended:
+                            _local_suspended.append(user)
+                            _pr(f"  ⚠ {user} appears suspended/deleted — will be removed")
+                        else:
+                            _local_results.append({
+                                "platform": pid,
+                                "display":  display,
+                                "count":    new_count,
+                                "corrupt":  corrupt_count,
+                                "files":    new_names,
+                                "folder":   str(_user_dl_folder),
+                            })
+
+                        if _is_par:
+                            _tbuf.flush_to(_redirector, _log_lock)
+                        elif not self.stop_flag.is_set() and i < len(users) - 1:
                             print(f"\nWaiting {sleep_user}s…")
                             time.sleep(sleep_user)
 
-            else:
-                # ── Sequential gallery-dl (X / Twitter) ──────────────────────
-                for i, user in enumerate(users):
-                    if self.stop_flag.is_set():
-                        break
+                return _local_results, _local_suspended
 
-                    display      = user.split("|")[0]
-                    safe_display = _re.sub(r'[\\/:*?"<>|]', "_", display).strip()
-                    print(f"\n{'─'*50}")
-                    print(f"[{i+1}/{len(users)}] {display}")
-                    print(f"{'─'*50}")
-
-                    url          = cfg["url_fn"](user)
-                    archive_file = str(Path("config") / f"{pid}_downloaded.db")
-                    user_dir     = base_dir / safe_display
-                    user_dir.mkdir(parents=True, exist_ok=True)
-                    _gdl_before  = set(user_dir.glob("*"))
-                    print(f"  Save to  : {user_dir}")
-                    cmd = [
-                        GDL,
-                        "--cookies", cookies_file,
-                        *(["--download-archive", archive_file] if not is_full else []),
-                        *(["-o", f"extractor.date-min={from_date}T00:00:00"] if from_date else []),
-                        "--sleep-request", str(sleep_req),
-                        "-D", str(user_dir),
-                        url,
-                    ]
-                    self._proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, encoding="utf-8", errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                    user_suspended = False
-                    for line in self._proc.stdout:
-                        if "api.day.app" in line or "Bark notification" in line:
+            # ── Dispatch: parallel across platforms, sequential for one ────────
+            if _parallel_plats:
+                from concurrent.futures import ThreadPoolExecutor as _PlatPool, \
+                                               as_completed      as _plat_ac
+                with _PlatPool(max_workers=len(by_pid)) as _ppool:
+                    _pfuts = {_ppool.submit(_run_platform, pid, users): pid
+                              for pid, users in by_pid.items()}
+                    for _pfut in _plat_ac(_pfuts):
+                        _ppid = _pfuts[_pfut]
+                        try:
+                            _presults, _psusp = _pfut.result()
+                        except Exception as exc:
+                            print(f"\n[ERROR] {_ppid}: {exc}")
                             continue
-                        print(line, end="")
-                        if "[error]" in line and any(k in line for k in (
-                                "could not be found", "UserUnavailable", "has been suspended")):
-                            user_suspended = True
-                        if not is_full and "# " in line:
-                            self._proc.terminate()
-                            print("\n  → Up to date.")
-                            break
-                    self._proc.wait()
+                        with _results_lock:
+                            _all_update_results.extend(_presults)
+                            if _psusp:
+                                _all_suspended.setdefault(_ppid, []).extend(_psusp)
+            else:
+                _pid, _users = next(iter(by_pid.items()))
+                _presults, _psusp = _run_platform(_pid, _users)
+                _all_update_results.extend(_presults)
+                if _psusp:
+                    _all_suspended.setdefault(_pid, []).extend(_psusp)
 
-                    _gdl_after  = set(user_dir.glob("*")) if user_dir.exists() else set()
-                    _new_files  = _gdl_after - _gdl_before
-                    new_count   = len(_new_files)
-                    new_names   = [f.name for f in _new_files]
-                    _user_dl_folder = user_dir.resolve()
+            for susp_pid, susp_handles in _all_suspended.items():
+                self._remove_suspended(susp_handles, susp_pid)
 
-                    corrupt = self._scan_corrupt(_user_dl_folder)
-                    corrupt_count = 0
-                    if corrupt:
-                        corrupt_count = len(corrupt)
-                        for f in corrupt:
-                            print(f"  ⚠ Corrupt/partial ({f.stat().st_size:,} B): {f.name} — deleted")
-                            f.unlink(missing_ok=True)
-                        hint = "will re-download now" if is_full else "run Full mode to re-download"
-                        print(f"  → {corrupt_count} corrupt file(s) removed ({hint})")
-                        new_count = max(0, new_count - corrupt_count)
-
-                    if user_suspended:
-                        suspended.append(user)
-                        print(f"  ⚠ {user} appears suspended/deleted — will be removed")
-                    else:
-                        _update_results.append({
-                            "display": display,
-                            "count":   new_count,
-                            "corrupt": corrupt_count,
-                            "files":   new_names,
-                            "folder":  str(_user_dl_folder),
-                        })
-
-                    if not self.stop_flag.is_set() and i < len(users) - 1:
-                        print(f"\nWaiting {sleep_user}s…")
-                        time.sleep(sleep_user)
-
-            if suspended:
-                self._remove_suspended(suspended, users_file, pid)
-
-            _elapsed   = time.time() - _run_start
+            _elapsed     = time.time() - _run_start
             _mins, _secs = divmod(int(_elapsed), 60)
-            _duration  = f"{_mins}m {_secs}s" if _mins else f"{_secs}s"
-            _stopped   = self.stop_flag.is_set()
-
-            if _update_results:
-                run_result = _build_run(stopped=_stopped)
-                self._pending_run_result = run_result
-                _upsert_run(run_result)
+            _stopped     = self.stop_flag.is_set()
 
             if not _stopped:
                 print("\n✓ ALL DONE.")
             else:
                 print("\n■ Stopped.")
+
+            # Save one combined history entry covering all platforms
+            if _all_update_results:
+                import datetime as _dt_end
+                _el = time.time() - _run_start
+                _m, _s = divmod(int(_el), 60)
+                combined = {
+                    "run_key":  _run_key,
+                    "date":     _dt_end.date.today().isoformat(),
+                    "time":     _dt_end.datetime.now().strftime("%H:%M"),
+                    "duration": f"{_m}m {_s}s" if _m else f"{_s}s",
+                    "mode":     "Full" if is_full else "Update",
+                    "stopped":  _stopped,
+                    "users":    _all_update_results,
+                }
+                total_new = sum(u.get("count", 0) for u in _all_update_results)
+                if not is_auto or total_new > 0:
+                    _upsert_run(combined)
+                if not is_auto:
+                    self._pending_run_result = combined
 
         except Exception as exc:
             print(f"\n[ERROR] {exc}")
@@ -2201,12 +3764,17 @@ class App(tk.Tk):
             time_    = run.get("time", "")
             duration = run.get("duration", "")
             stopped  = run.get("stopped", False)
-            pid_key  = run.get("platform", "")
-            platform = PLATFORMS.get(pid_key, {}).get("label", pid_key)
             mode     = run.get("mode", "")
             users    = run.get("users", [])
             total    = sum(u.get("count", 0) for u in users)
             total_corrupt = sum(u.get("corrupt", 0) for u in users)
+
+            # Collect distinct platforms present in this run
+            seen_pids: list[str] = []
+            for u in users:
+                p = u.get("platform", "")
+                if p and p not in seen_pids:
+                    seen_pids.append(p)
 
             card = tk.Frame(inner, bg=BG, highlightthickness=1,
                             highlightbackground=SEP)
@@ -2232,10 +3800,19 @@ class App(tk.Tk):
             tags = tk.Frame(hdr, bg=BG_HDR)
             tags.pack(side=tk.RIGHT, padx=8, pady=4)
 
-            if platform:
-                p_color = PLATFORMS.get(pid_key, {}).get("color", "#2d2d2d")
-                tk.Label(tags, text=f" {platform} ", bg=p_color, fg="#000000",
-                         font=FONTS["small"]).pack(side=tk.LEFT, padx=2)
+            for pid_key in seen_pids:
+                _pcfg   = PLATFORMS.get(pid_key, {})
+                _icon   = self._platform_icons.get(pid_key)
+                if _icon:
+                    _ibg = _pcfg.get("icon_bg", _pcfg.get("color", "#2d2d2d"))
+                    tk.Label(tags, image=_icon, bg=_ibg,
+                             bd=0, highlightthickness=0,
+                             padx=2, pady=2).pack(side=tk.LEFT, padx=2)
+                else:
+                    _plabel = _pcfg.get("label", pid_key)
+                    _pcolor = _pcfg.get("color", "#2d2d2d")
+                    tk.Label(tags, text=f" {_plabel} ", bg=_pcolor, fg="#000000",
+                             font=FONTS["small"]).pack(side=tk.LEFT, padx=2)
 
             if mode:
                 tk.Label(tags, text=f" {mode} ", bg="#2d2d2d", fg="#555555",
@@ -2256,11 +3833,13 @@ class App(tk.Tk):
             body.pack(fill=tk.X, padx=0, pady=(2, 4))
 
             for u in users:
-                count   = u.get("count",   0)
-                corrupt = u.get("corrupt", 0)
-                files   = u.get("files",   [])
-                folder  = u.get("folder",  "")
-                display = u.get("display", "")
+                count    = u.get("count",    0)
+                corrupt  = u.get("corrupt",  0)
+                files    = u.get("files",    [])
+                folder   = u.get("folder",   "")
+                display  = u.get("display",  "")
+                u_pid  = u.get("platform", "")
+                u_pcfg = PLATFORMS.get(u_pid, {})
 
                 row = tk.Frame(body, bg=BG)
                 row.pack(fill=tk.X, padx=10, pady=1)
@@ -2269,6 +3848,19 @@ class App(tk.Tk):
                 tk.Label(row, text=f"+{count}", bg=BG, fg=badge_fg,
                          font=(*FONTS["small"], "bold"),
                          width=4, anchor=tk.E).pack(side=tk.LEFT)
+
+                if u_pid and len(seen_pids) > 1:
+                    _uicon = self._platform_icons.get(u_pid)
+                    if _uicon:
+                        _uibg = u_pcfg.get("icon_bg", u_pcfg.get("color", "#444444"))
+                        tk.Label(row, image=_uicon, bg=_uibg,
+                                 bd=0, highlightthickness=0,
+                                 padx=2, pady=1).pack(side=tk.LEFT, padx=(4, 0))
+                    else:
+                        _uplabel = u_pcfg.get("label", u_pid)
+                        _upcolor = u_pcfg.get("color", "#444444")
+                        tk.Label(row, text=f" {_uplabel} ", bg=_upcolor, fg="#000000",
+                                 font=FONTS["small"]).pack(side=tk.LEFT, padx=(4, 0))
 
                 tk.Label(row, text=f"  {display}", bg=BG, fg=FG,
                          font=FONTS["body"]).pack(side=tk.LEFT)
@@ -2358,15 +3950,12 @@ class App(tk.Tk):
 
         dlg.deiconify()
 
-    def _remove_suspended(self, suspended: list[str], users_file: str, pid: str):
-        suspended_set = set(suspended)
-        path          = Path(users_file)
-        remaining     = [u for u in path.read_text(encoding="utf-8").splitlines()
-                         if u.strip() and u.strip() not in suspended_set]
-        path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
-        print(f"\n[INFO] Removed {len(suspended)} suspended account(s): "
+    def _remove_suspended(self, suspended: list[str], pid: str):
+        for handle in suspended:
+            self._store.remove_entry_by_handle(pid, handle)
+        print(f"\n[INFO] Cleared {len(suspended)} suspended handle(s) from creators: "
               f"{', '.join(suspended)}")
-        self.after(0, self._load_users_for, pid)
+        self.after(0, self._refresh_creator_list)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

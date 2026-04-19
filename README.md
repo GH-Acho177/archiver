@@ -1,8 +1,8 @@
-# Media Downloader
+# Archiver
 
 A Windows desktop app for batch-downloading media from **X (Twitter)**, **Douyin (抖音)**, and **Bilibili**.
 
-Current version: **2.1.2** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
+Current version: **3.0.0** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
 
 ---
 
@@ -12,7 +12,8 @@ Current version: **2.1.2** — [Download installer](https://github.com/GH-Acho17
 - **Update mode** — fetch only new posts since the last run
 - **Full mode** — download everything, with optional day-range limit
 - Single video/post download by pasting a URL directly
-- Parallel downloads with configurable worker count and sleep intervals
+- Parallel downloads across platforms and configurable worker count
+- Organises downloads by creator: `downloads/{Creator}/{account}/`
 - Per-platform cookie authentication
 - Update history viewer
 - System tray support (minimise to tray)
@@ -49,7 +50,9 @@ python app.py
 
 ---
 
-## Adding Users
+## Adding Accounts
+
+Accounts are organised under **Creators** in the Accounts panel. Each creator can have accounts across multiple platforms.
 
 | Platform | Accepted input |
 |----------|----------------|
@@ -57,7 +60,21 @@ python app.py
 | Douyin | profile page URL **or** bare sec_uid |
 | Bilibili | space page URL **or** bare UID |
 
-For Douyin and Bilibili you can simply copy the profile URL from your browser and paste it in — the app extracts the ID automatically.
+For Douyin and Bilibili you can copy the profile URL directly from your browser — the app extracts the ID automatically.
+
+---
+
+## Download Structure
+
+```
+downloads/
+  {Creator Name}/
+    {account display name}/
+      files…
+  Unassigned/
+    {account display name}/
+      files…
+```
 
 ---
 
@@ -67,6 +84,7 @@ For Douyin and Bilibili you can simply copy the profile URL from your browser an
 app.py                  # Application entry point
 src/
   config.py             # Constants, platform config, UI strings, theme colours
+  creator_store.py      # Creator / entry persistence (config/creators.json)
   utils.py              # Shared utilities
 helpers/
   f2_user.py            # Douyin batch downloader (via f2)
@@ -74,7 +92,7 @@ helpers/
 assets/
   icon.ico
 packaging/
-  MediaDownloader.spec  # PyInstaller spec
+  Archiver.spec         # PyInstaller spec
   installer.iss         # Inno Setup script
   gallery-dl.exe        # (not tracked — download separately)
   yt-dlp.exe            # (not tracked — download separately)
@@ -98,9 +116,9 @@ pip install pyinstaller sv_ttk f2 aiohttp aiofiles pystray pillow
 
 **3. Build with PyInstaller**
 ```
-pyinstaller packaging/MediaDownloader.spec
+pyinstaller packaging/Archiver.spec
 ```
 
-Output: `dist\MediaDownloader\` (portable folder)
+Output: `dist\Archiver\` (portable folder)
 
-**4. Optional installer** — compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to produce `dist\MediaDownloader_Setup_2.1.2.exe`.
+**4. Optional installer** — compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to produce `dist\Archiver_Setup_3.0.0.exe`.

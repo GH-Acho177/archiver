@@ -1,3 +1,5 @@
+import io
+import threading
 import tkinter as tk
 from pathlib import Path
 
@@ -57,6 +59,68 @@ class _LineWriter:
             self._inner.write(self._prefix + self._buf)
             self._buf = ""
         self._inner.flush()
+
+
+# ── Per-task buffering for parallel downloads ─────────────────────────────────
+class _TaskBuffer:
+    """Collects a task's output into a StringIO; flush_to() dumps atomically."""
+
+    def __init__(self):
+        self._sio  = io.StringIO()
+        self._buf  = ""          # partial line accumulator for prefixed writes
+
+    # Raw write — no prefix; use for header lines already formatted
+    def write_raw(self, text: str):
+        self._sio.write(text)
+
+    # Prefixed write — wraps a writer interface so it can be used with _LineWriter
+    def make_prefixed_writer(self, prefix="", skip_fn=None, line_cb=None):
+        return _LineWriter(self, prefix=prefix, skip_fn=skip_fn, line_cb=line_cb)
+
+    # Writer interface (used by _LineWriter as its inner)
+    def write(self, text: str):
+        self._sio.write(text)
+
+    def flush(self):
+        pass
+
+    def flush_to(self, target, lock: threading.Lock):
+        content = self._sio.getvalue()
+        if content:
+            with lock:
+                target.write(content)
+                target.flush()
+
+
+# ── Thread-local stdout router for parallel tasks ─────────────────────────────
+class _ThreadRouter:
+    """
+    sys.stdout drop-in that routes writes per-thread via threading.local.
+    Each parallel task calls set_target(writer) so its prints go to its
+    own buffer rather than the shared default.
+    """
+    def __init__(self, default):
+        self._default = default
+        self._local   = threading.local()
+
+    def write(self, text):
+        getattr(self._local, "target", self._default).write(text)
+
+    def flush(self):
+        getattr(self._local, "target", self._default).flush()
+
+    def set_target(self, writer):
+        self._local.target = writer
+
+    def clear_target(self):
+        try:
+            del self._local.target
+        except AttributeError:
+            pass
+
+    @property
+    def default(self):
+        return self._default
 
 
 # ── Safe file deletion ─────────────────────────────────────────────────────────
