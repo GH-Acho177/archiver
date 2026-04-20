@@ -2,7 +2,7 @@
 
 A Windows desktop app for batch-downloading media from **X (Twitter)**, **Douyin (抖音)**, and **Bilibili**.
 
-Current version: **3.1.0** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
+Current version: **3.1.4** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
 
 ---
 
@@ -70,11 +70,9 @@ For Douyin and Bilibili you can copy the profile URL directly from your browser 
 ```
 downloads/
   {Creator Name}/
-    {account display name}/
-      files…
+    files…
   Unassigned/
-    {account display name}/
-      files…
+    files…
 ```
 
 ---
