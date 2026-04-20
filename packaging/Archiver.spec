@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# PyInstaller spec for Media Downloader
-# Run:  pyinstaller build\MediaDownloader.spec   (from project root)
+# PyInstaller spec for Archiver
+# Run:  pyinstaller packaging/Archiver.spec   (from project root)
 #
 import importlib.util as _ilu
 from pathlib import Path
@@ -11,14 +11,11 @@ block_cipher = None
 _root = Path(SPECPATH).parent   # project root  (spec lives in packaging/, so parent = root)
 
 # ── Locate sv_ttk and copy its entire package folder into the bundle ───────────
-# collect_all / collect_data_files only grab theme assets, not the .py files.
-# Copying the folder to datas works because PyInstaller adds sys._MEIPASS to
-# sys.path at runtime, making anything placed there directly importable.
 _sv = _ilu.find_spec('sv_ttk')
 if not _sv or not _sv.submodule_search_locations:
     raise SystemExit(
         "\n[BUILD ERROR] sv_ttk not found.\n"
-        "Activate the virtual environment that has sv_ttk installed, then re-run build.bat.\n"
+        "Activate the virtual environment that has sv_ttk installed, then re-run.\n"
     )
 _sv_dir = list(_sv.submodule_search_locations)[0]
 
@@ -32,8 +29,12 @@ datas += collect_data_files('f2')         # f2 language / config files
 datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
 if (_root / 'fonts').exists():
     datas += [(str(_root / 'fonts'), 'fonts')]   # bundled fonts (e.g. JetBrains Mono)
-if (_root / 'assets' / 'icon.ico').exists():
-    datas += [(str(_root / 'assets' / 'icon.ico'), 'assets')]  # tray / window icon
+
+# Assets (icon + platform icons)
+_assets = _root / 'assets'
+for _asset in ('icon.ico', 'icon.png', 'X.png', 'douyin.png', 'bilibili.png'):
+    if (_assets / _asset).exists():
+        datas += [(str(_assets / _asset), 'assets')]
 
 # ── Bundled tool binaries (live next to this spec in packaging/) ───────────────
 for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
@@ -47,10 +48,10 @@ for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
 hiddenimports += [
     'src.config',
     'src.utils',
+    'src.creator_store',
     'sv_ttk',
     'tkinter',
     'tkinter.ttk',
-    'tkinter.scrolledtext',
     'tkinter.messagebox',
     'tkinter.filedialog',
     'asyncio',
@@ -93,12 +94,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='MediaDownloader',
+    name='Archiver',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,                          # no console window
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
@@ -115,5 +116,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='MediaDownloader',
+    name='Archiver',
 )

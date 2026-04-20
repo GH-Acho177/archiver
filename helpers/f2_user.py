@@ -15,7 +15,7 @@ async def download_user(
     cookie: str,
     outdir: str,
     interval: str,
-    naming: str = "{create}_{aweme_id}",
+    naming: str = "{create:.10}_{aweme_id}",
     stop_check=None,
 ) -> None:
     from f2.apps.douyin.utils import ClientConfManager, SecUserIdFetcher
@@ -80,7 +80,7 @@ async def main() -> None:
     cookie   = sys.argv[2]
     outdir   = sys.argv[3]
     interval = sys.argv[4]
-    naming   = sys.argv[5] if len(sys.argv) > 5 else "{create}_{aweme_id}"
+    naming   = sys.argv[5] if len(sys.argv) > 5 else "{create:.10}_{aweme_id}"
     await download_user(url, cookie, outdir, interval, naming)
 
 

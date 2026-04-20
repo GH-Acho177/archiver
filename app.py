@@ -1346,15 +1346,58 @@ class App(tk.Tk):
                 return
             cfg = PLATFORMS[pid]
 
-            def _finish(handle: str, creator_name: str):
-                creator = self._store.add_creator(creator_name)
-                self._store.add_entry(pid, handle, creator.id)
+            def _finish(handle: str):
+                self._store.add_entry(pid, handle, None)
                 _entry_var.set("")
                 self._refresh_creator_list()
 
             if pid == "x":
                 handle = raw.lstrip("@")
-                _finish(handle, handle)
+                if not handle:
+                    return
+                self._bar_entry.configure(state="disabled")
+                self._bar_add_btn.configure(state=tk.DISABLED)
+
+                def _fetch_x(h=handle):
+                    display = None
+                    try:
+                        _BEARER = (
+                            "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
+                            "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+                        )
+                        ctx  = ssl.create_default_context()
+                        conn = http.client.HTTPSConnection(
+                            "api.twitter.com", timeout=8, context=ctx)
+                        conn.request("POST", "/1.1/guest/activate.json", headers={
+                            "Authorization": f"Bearer {_BEARER}",
+                            "Content-Length": "0",
+                        })
+                        guest = _json.loads(conn.getresponse().read()).get("guest_token")
+                        conn.close()
+                        if guest:
+                            conn = http.client.HTTPSConnection(
+                                "api.twitter.com", timeout=8, context=ctx)
+                            conn.request(
+                                "GET", f"/1.1/users/show.json?screen_name={h}",
+                                headers={
+                                    "Authorization": f"Bearer {_BEARER}",
+                                    "x-guest-token": guest,
+                                    "User-Agent": "Mozilla/5.0",
+                                },
+                            )
+                            data = _json.loads(conn.getresponse().read())
+                            conn.close()
+                            display = data.get("name") or None
+                    except Exception:
+                        pass
+
+                    def _apply():
+                        self._bar_entry.configure(state="normal")
+                        self._bar_add_btn.configure(state=tk.NORMAL)
+                        _finish(f"{display}|{h}" if display and display != h else h)
+                    self.after(0, _apply)
+
+                threading.Thread(target=_fetch_x, daemon=True).start()
 
             elif pid == "bilibili":
                 m   = _re.search(r"space\.bilibili\.com/(\d+)", raw)
@@ -1384,7 +1427,7 @@ class App(tk.Tk):
                         self._bar_entry.configure(state="normal")
                         self._bar_add_btn.configure(state=tk.NORMAL)
                         name = nick or uid
-                        _finish(f"{name}|{uid}", name)
+                        _finish(f"{name}|{uid}")
                     self.after(0, _apply)
 
                 threading.Thread(target=_fetch_bl, daemon=True).start()
@@ -1398,7 +1441,10 @@ class App(tk.Tk):
                 def _fetch_dy():
                     nick = None
                     try:
-                        cookies: dict[str, str] = {}
+                        import asyncio as _aio
+                        from f2.apps.douyin.handler import DouyinHandler
+                        from f2.apps.douyin.utils import ClientConfManager
+                        _ck: dict[str, str] = {}
                         cf = Path(cfg["cookies_file"])
                         if cf.exists():
                             for line in cf.read_text(encoding="utf-8").splitlines():
@@ -1406,33 +1452,26 @@ class App(tk.Tk):
                                     continue
                                 fields = line.split("\t")
                                 if len(fields) >= 7:
-                                    cookies[fields[5].strip()] = fields[6].strip()
-                        params = urllib.parse.urlencode({
-                            "sec_user_id": sec_uid, "aid": "6383",
-                            "cookie_enabled": "true", "platform": "PC",
-                        })
-                        ctx  = ssl.create_default_context()
-                        conn = http.client.HTTPSConnection(
-                            "www.douyin.com", timeout=10, context=ctx)
-                        conn.request("GET",
-                                     f"/aweme/v1/web/user/profile/other/?{params}",
-                                     headers={
-                                         "Cookie": "; ".join(
-                                             f"{k}={v}" for k, v in cookies.items()),
-                                         "User-Agent": "Mozilla/5.0",
-                                         "Referer": "https://www.douyin.com/",
-                                         "Accept": "application/json",
-                                     })
-                        data = _json.loads(conn.getresponse().read())
-                        conn.close()
-                        nick = (data.get("user") or {}).get("nickname") or None
+                                    _ck[fields[5].strip()] = fields[6].strip()
+                        _kw = {
+                            "cookie":          "; ".join(f"{k}={v}" for k, v in _ck.items()),
+                            "headers":         ClientConfManager.headers(),
+                            "path":            ".", "mode": "post",
+                            "naming":          "{create:.10}_{aweme_id}",
+                            "languages":       "en_US", "timeout": 10,
+                            "max_retries":     2, "max_connections": 5,
+                            "max_tasks":       5, "page_counts": 20, "max_counts": None,
+                        }
+                        async def _af():
+                            return (await DouyinHandler(_kw).fetch_user_profile(sec_uid)).nickname_raw
+                        nick = _aio.run(_af()) or None
                     except Exception:
                         pass
                     def _apply():
                         self._bar_entry.configure(state="normal")
                         self._bar_add_btn.configure(state=tk.NORMAL)
                         name = nick or sec_uid
-                        _finish(f"{name}|{sec_uid}", name)
+                        _finish(f"{name}|{sec_uid}")
                     self.after(0, _apply)
 
                 threading.Thread(target=_fetch_dy, daemon=True).start()
@@ -1597,15 +1636,15 @@ class App(tk.Tk):
                      font=FONTS["small"]).pack(padx=12, pady=20)
             return
 
+        # ── Unassigned entries (top) ──────────────────────────────────────────
+        unassigned = self._store.get_unassigned_entries()
+        if unassigned:
+            self._render_unassigned_section(unassigned, self._creators_inner)
+
         # ── Creator groups ────────────────────────────────────────────────────
         for creator in creators:
             c_entries = self._store.get_entries_for_creator(creator.id)
             self._render_creator_section(creator, c_entries, self._creators_inner)
-
-        # ── Unassigned entries ────────────────────────────────────────────────
-        unassigned = self._store.get_unassigned_entries()
-        if unassigned:
-            self._render_unassigned_section(unassigned, self._creators_inner)
 
     # ── Hover helper ───────────────────────────────────────────────────────────
     def _bind_row_hover(self, root_frame: tk.Frame,
@@ -2026,9 +2065,9 @@ class App(tk.Tk):
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
-        self._centre_dialog(dlg, 520, 150)
+        self._centre_dialog(dlg, 600, 180)
 
-        outer = ttk.Frame(dlg, padding=24)
+        outer = ttk.Frame(dlg, padding=28)
         outer.pack(fill=tk.BOTH, expand=True)
         name_var = tk.StringVar(value=creator.name)
         entry = ttk.Entry(outer, textvariable=name_var, font=FONTS["body"])
@@ -2252,7 +2291,10 @@ class App(tk.Tk):
                 def _fetch_dy():
                     nick = None
                     try:
-                        cookies: dict[str, str] = {}
+                        import asyncio as _aio
+                        from f2.apps.douyin.handler import DouyinHandler
+                        from f2.apps.douyin.utils import ClientConfManager
+                        _ck: dict[str, str] = {}
                         cf = Path(cfg["cookies_file"])
                         if cf.exists():
                             for line in cf.read_text(encoding="utf-8").splitlines():
@@ -2260,26 +2302,19 @@ class App(tk.Tk):
                                     continue
                                 fields = line.split("\t")
                                 if len(fields) >= 7:
-                                    cookies[fields[5].strip()] = fields[6].strip()
-                        params = urllib.parse.urlencode({
-                            "sec_user_id": sec_uid, "aid": "6383",
-                            "cookie_enabled": "true", "platform": "PC",
-                        })
-                        ctx  = ssl.create_default_context()
-                        conn = http.client.HTTPSConnection(
-                            "www.douyin.com", timeout=10, context=ctx)
-                        conn.request("GET",
-                                     f"/aweme/v1/web/user/profile/other/?{params}",
-                                     headers={
-                                         "Cookie": "; ".join(
-                                             f"{k}={v}" for k, v in cookies.items()),
-                                         "User-Agent": "Mozilla/5.0",
-                                         "Referer": "https://www.douyin.com/",
-                                         "Accept": "application/json",
-                                     })
-                        data = _json.loads(conn.getresponse().read())
-                        conn.close()
-                        nick = (data.get("user") or {}).get("nickname") or None
+                                    _ck[fields[5].strip()] = fields[6].strip()
+                        _kw = {
+                            "cookie":          "; ".join(f"{k}={v}" for k, v in _ck.items()),
+                            "headers":         ClientConfManager.headers(),
+                            "path":            ".", "mode": "post",
+                            "naming":          "{create:.10}_{aweme_id}",
+                            "languages":       "en_US", "timeout": 10,
+                            "max_retries":     2, "max_connections": 5,
+                            "max_tasks":       5, "page_counts": 20, "max_counts": None,
+                        }
+                        async def _af():
+                            return (await DouyinHandler(_kw).fetch_user_profile(sec_uid)).nickname_raw
+                        nick = _aio.run(_af()) or None
                     except Exception:
                         pass
 
@@ -2425,13 +2460,18 @@ class App(tk.Tk):
 
         _sep(dc, 1)
 
+        interval_sp = _spinbox(dc, "auto_update_interval", 30, 5, 1440, increment=5, w=6)
+        _row(dc, 2, "Auto-run interval (min)", interval_sp)
+
+        _sep(dc, 3)
+
         # Download location — entry expands full width across cols 1-3
         self._dl_path_var = tk.StringVar(value=str(self._get_download_dir()))
         loc_lbl = _lbl(dc, self._t("settings.dl_location"), "settings.dl_location")
-        loc_lbl.grid(row=2, column=0, sticky="w", pady=ROW_PAD)
+        loc_lbl.grid(row=4, column=0, sticky="w", pady=ROW_PAD)
 
         loc_entry = ttk.Entry(dc, textvariable=self._dl_path_var, font=FONTS["body"])
-        loc_entry.grid(row=2, column=1, columnspan=2, sticky="ew",
+        loc_entry.grid(row=4, column=1, columnspan=2, sticky="ew",
                        padx=(14, 6), pady=ROW_PAD)
         dc.columnconfigure(2, weight=1)
 
@@ -2447,7 +2487,7 @@ class App(tk.Tk):
 
         self._reg(ttk.Button(dc, text=self._t("btn.browse"),
                              style="Secondary.TButton", command=_browse_dl),
-                  "btn.browse").grid(row=2, column=3, sticky="e", pady=ROW_PAD)
+                  "btn.browse").grid(row=4, column=3, sticky="e", pady=ROW_PAD)
 
         # ── Appearance ────────────────────────────────────────────────────────
         apc = _card(self._t("settings.appearance"))
@@ -2743,13 +2783,13 @@ class App(tk.Tk):
                     import f2_one as _f2_one
                     asyncio.run(_f2_one.download_one(
                         aweme_id, cookie_str, dl_outdir,
-                        "{nickname}_{create}_{aweme_id}",
+                        "{nickname}_{create:.10}_{aweme_id}",
                     ))
                 elif cfg.get("downloader") == "yt-dlp":
                     cmd = [
                         "yt-dlp",
                         "--cookies", cfg["cookies_file"],
-                        "-o", "%(id)s_%(title)s.%(ext)s",
+                        "-o", "%(upload_date>%Y-%m-%d)s_%(id)s_%(title)s.%(ext)s",
                         "-P", outdir,
                         _url,
                     ]
@@ -3226,6 +3266,7 @@ class App(tk.Tk):
                     src_entries = self._store.get_unassigned_entries()
                     _cname = "Unassigned"
                 else:
+                    src_entries = self._store.get_entries_for_creator(cid)
                     _c = self._store.get_creator(cid)
                     _cname = _c.name if _c else "Unassigned"
                 _safe_cname = _re.sub(r'[\\/:*?"<>|]', "_", _cname).strip()
@@ -3332,10 +3373,10 @@ class App(tk.Tk):
                             return None, False, user
 
                         _creator_dir = _handle_creator.get((pid, user), "Unassigned")
-                        _user_dir_f  = _dl_root / _creator_dir / safe_display
+                        _user_dir_f  = _dl_root / _creator_dir
                         _before      = set(_user_dir_f.glob("*")) if _user_dir_f.exists() else set()
                         _user_dir_f.mkdir(parents=True, exist_ok=True)
-                        _out(f"  Save to  : {_creator_dir}/{safe_display}")
+                        _out(f"  Save to  : {_creator_dir}/")
 
                         import f2_user as _f2_user
                         user_suspended = False
@@ -3356,7 +3397,7 @@ class App(tk.Tk):
                             try:
                                 asyncio.run(_f2_user.download_user(
                                     url, cookie_str, str(_user_dir_f), interval,
-                                    "{create}_{aweme_id}",
+                                    "{create:.10}_{aweme_id}",
                                     stop_check=self.stop_flag.is_set,
                                 ))
                             finally:
@@ -3372,7 +3413,7 @@ class App(tk.Tk):
                             try:
                                 asyncio.run(_f2_user.download_user(
                                     url, cookie_str, str(_user_dir_f), interval,
-                                    "{create}_{aweme_id}",
+                                    "{create:.10}_{aweme_id}",
                                     stop_check=self.stop_flag.is_set,
                                 ))
                             finally:
@@ -3470,17 +3511,17 @@ class App(tk.Tk):
                         url          = cfg["url_fn"](user)
                         archive_file = str(Path("config") / f"{pid}_downloaded.txt")
                         _creator_dir = _handle_creator.get((pid, user), "Unassigned")
-                        user_dir     = _dl_root / _creator_dir / safe_display
+                        user_dir     = _dl_root / _creator_dir
                         user_dir.mkdir(parents=True, exist_ok=True)
                         _before      = set(user_dir.glob("*"))
-                        _pr(f"{prefix}Save to  : {_creator_dir}/{safe_display}")
+                        _pr(f"{prefix}Save to  : {_creator_dir}/")
                         cmd = [
                             "yt-dlp",
                             "--cookies", cookies_file,
                             *(["--download-archive", archive_file] if not is_full else []),
                             *(["--dateafter", dateafter] if dateafter else []),
                             "--sleep-requests", str(sleep_req),
-                            "-o", "%(id)s_%(title)s.%(ext)s",
+                            "-o", "%(upload_date>%Y-%m-%d)s_%(id)s_%(title)s.%(ext)s",
                             "-P", str(user_dir),
                             url,
                         ]
@@ -3591,15 +3632,16 @@ class App(tk.Tk):
                         url          = cfg["url_fn"](user)
                         archive_file = str(Path("config") / f"{pid}_downloaded.db")
                         _creator_dir = _handle_creator.get((pid, user), "Unassigned")
-                        user_dir     = _dl_root / _creator_dir / safe_display
+                        user_dir     = _dl_root / _creator_dir
                         user_dir.mkdir(parents=True, exist_ok=True)
                         _gdl_before  = set(user_dir.glob("*"))
-                        _pr(f"  Save to  : {_creator_dir}/{safe_display}")
+                        _pr(f"  Save to  : {_creator_dir}/")
                         cmd = [
                             GDL,
                             "--cookies", cookies_file,
                             *(["--download-archive", archive_file] if not is_full else []),
                             *(["-o", f"extractor.date-min={from_date}T00:00:00"] if from_date else []),
+                            "-o", "filename={date:%Y-%m-%d}_{id}.{extension}",
                             "--sleep-request", str(sleep_req),
                             "-D", str(user_dir),
                             url,

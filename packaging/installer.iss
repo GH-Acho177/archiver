@@ -3,14 +3,14 @@
 ; Compile:  Right-click this file → Compile  (or open in Inno Setup IDE)
 
 #define AppName      "Archiver"
-#define AppVersion   "3.1.0"
+#define AppVersion   "3.1.4"
 #define AppPublisher "GH-Acho177"
 #define AppExeName   "Archiver.exe"
 ; Install into user's AppData so no UAC prompt is needed
 #define DefaultInstDir "{localappdata}\Archiver"
 
 [Setup]
-AppId={{BA0057F9-834C-49A4-B889-3B01EFE23692}
+AppId={{F924C0FB-92D2-412D-8792-EB7D7AEDA9A1}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisherURL="https://github.com/GH-Acho177"

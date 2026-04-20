@@ -1,4 +1,4 @@
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.4"
 
 # ── Platform config ────────────────────────────────────────────────────────────
 PLATFORMS = {
@@ -8,7 +8,7 @@ PLATFORMS = {
         "color":        "#1d9bf0",
         "users_file":   "config/x_users.txt",
         "cookies_file": "config/x_cookies.txt",
-        "url_fn":       lambda u: f"https://x.com/{u}/media",
+        "url_fn":       lambda u: f"https://x.com/{u.split('|')[-1]}/media",
         "downloader":   "gallery-dl",
         "entry_format": "id",
     },

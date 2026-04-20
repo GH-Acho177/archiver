@@ -148,13 +148,19 @@ class CreatorStore:
 
     def remove_entry(self, entry_id: str) -> None:
         self._entries = [e for e in self._entries if e.id != entry_id]
+        self._prune_empty_creators()
         self.save()
 
     def assign_entry(self, entry_id: str, creator_id: "str | None") -> None:
         e = self.get_entry(entry_id)
         if e:
             e.creator_id = creator_id
+            self._prune_empty_creators()
             self.save()
+
+    def _prune_empty_creators(self) -> None:
+        occupied = {e.creator_id for e in self._entries if e.creator_id}
+        self._creators = [c for c in self._creators if c.id in occupied]
 
     def remove_entry_by_handle(self, platform: str, handle: str) -> None:
         """Used by suspended-account cleanup."""
