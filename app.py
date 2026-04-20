@@ -2797,8 +2797,9 @@ class App(tk.Tk):
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=subprocess.CREATE_NO_WINDOW,
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
                     )
-                    for line in self._proc.stdout:
+                    for line in iter(self._proc.stdout.readline, ""):
                         print(line, end="")
                     self._proc.wait()
                 else:
@@ -2812,8 +2813,9 @@ class App(tk.Tk):
                         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         text=True, encoding="utf-8", errors="replace",
                         creationflags=subprocess.CREATE_NO_WINDOW,
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
                     )
-                    for line in self._proc.stdout:
+                    for line in iter(self._proc.stdout.readline, ""):
                         if "api.day.app" in line or "Bark notification" in line:
                             continue
                         print(line, end="")
@@ -3256,7 +3258,7 @@ class App(tk.Tk):
             print(f"Creators : {len(creator_ids)}\n")
 
             sleep_req  = float(self._load_setting("sleep_req",  0))
-            sleep_user = float(self._load_setting("sleep_user", 0))
+            sleep_user = min(float(self._load_setting("sleep_user", 0)), 5.0)
 
             # Collect handles per platform from selected creators
             by_pid: dict[str, list[str]] = {}
@@ -3340,6 +3342,7 @@ class App(tk.Tk):
 
                         if _is_par:
                             _tbuf = _TaskBuffer()
+                            _tbuf.start_periodic_flush(_redirector, _log_lock)
                             _out  = _tbuf.write_raw
                             _outp = lambda t: _tbuf.write_raw(f"  {tag} {t}\n")
                         else:
@@ -3501,6 +3504,7 @@ class App(tk.Tk):
 
                         if _is_par:
                             _tbuf = _TaskBuffer()
+                            _tbuf.start_periodic_flush(_redirector, _log_lock)
                             _pr   = lambda t, end="\n": _tbuf.write_raw(f"{t}{end}")
                         else:
                             _pr   = lambda t, end="\n": print(t, end=end)
@@ -3530,6 +3534,7 @@ class App(tk.Tk):
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace",
                             creationflags=subprocess.CREATE_NO_WINDOW,
+                            env={**os.environ, "PYTHONUNBUFFERED": "1"},
                         )
                         if not _is_par:
                             self._proc = proc
@@ -3538,7 +3543,7 @@ class App(tk.Tk):
                         user_suspended       = False
                         _completed_posts: list[str] = []
                         try:
-                            for line in proc.stdout:
+                            for line in iter(proc.stdout.readline, ""):
                                 _pr(f"{prefix}{line}", end="")
                                 if "ERROR" in line and any(k in line for k in (
                                         "not found", "unavailable", "suspended", "deleted")):
@@ -3547,6 +3552,8 @@ class App(tk.Tk):
                                     _fname = line.split('"')[1] if '"' in line else ""
                                     if _fname:
                                         _completed_posts.append(Path(_fname).name)
+                                if _is_par:
+                                    _tbuf.timed_flush_to(_redirector, _log_lock)
                                 if self.stop_flag.is_set():
                                     proc.terminate()
                                     break
@@ -3607,8 +3614,9 @@ class App(tk.Tk):
                             elif result:
                                 _local_results.append(result)
                             if not _is_par and not self.stop_flag.is_set() and i < len(users) - 1:
-                                print(f"\nWaiting {sleep_user}s…")
-                                time.sleep(sleep_user)
+                                _cur_sleep = min(sleep_user + i, 30)
+                                print(f"\nWaiting {_cur_sleep}s…")
+                                time.sleep(_cur_sleep)
 
                 else:
                     # ── gallery-dl (X / Twitter) — sequential per user ────────
@@ -3621,6 +3629,7 @@ class App(tk.Tk):
 
                         if _is_par:
                             _tbuf = _TaskBuffer()
+                            _tbuf.start_periodic_flush(_redirector, _log_lock)
                             _pr   = lambda t, end="\n": _tbuf.write_raw(f"{t}{end}")
                         else:
                             _pr   = lambda t, end="\n": print(t, end=end)
@@ -3641,7 +3650,7 @@ class App(tk.Tk):
                             "--cookies", cookies_file,
                             *(["--download-archive", archive_file] if not is_full else []),
                             *(["-o", f"extractor.date-min={from_date}T00:00:00"] if from_date else []),
-                            "-o", "filename={date:%Y-%m-%d}_{id}.{extension}",
+                            "-o", "filename={date_url:%Y-%m-%d}_{id}.{extension}",
                             "--sleep-request", str(sleep_req),
                             "-D", str(user_dir),
                             url,
@@ -3651,13 +3660,14 @@ class App(tk.Tk):
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace",
                             creationflags=subprocess.CREATE_NO_WINDOW,
+                            env={**os.environ, "PYTHONUNBUFFERED": "1"},
                         )
                         if not _is_par:
                             self._proc = gdl_proc
                         with self._procs_lock:
                             self._procs.append(gdl_proc)
                         user_suspended = False
-                        for line in gdl_proc.stdout:
+                        for line in iter(gdl_proc.stdout.readline, ""):
                             if "api.day.app" in line or "Bark notification" in line:
                                 continue
                             _pr(line, end="")
@@ -3668,6 +3678,8 @@ class App(tk.Tk):
                                 gdl_proc.terminate()
                                 _pr("\n  → Up to date.")
                                 break
+                            if _is_par:
+                                _tbuf.timed_flush_to(_redirector, _log_lock)
                         gdl_proc.wait()
                         with self._procs_lock:
                             if gdl_proc in self._procs:
@@ -3706,8 +3718,9 @@ class App(tk.Tk):
                         if _is_par:
                             _tbuf.flush_to(_redirector, _log_lock)
                         elif not self.stop_flag.is_set() and i < len(users) - 1:
-                            print(f"\nWaiting {sleep_user}s…")
-                            time.sleep(sleep_user)
+                            _cur_sleep = min(sleep_user + i, 30)
+                            print(f"\nWaiting {_cur_sleep}s…")
+                            time.sleep(_cur_sleep)
 
                 return _local_results, _local_suspended
 

@@ -2,7 +2,7 @@
 
 A Windows desktop app for batch-downloading media from **X (Twitter)**, **Douyin (抖音)**, and **Bilibili**.
 
-Current version: **3.1.4** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
+Current version: **3.1.6** — [Download installer](https://github.com/GH-Acho177/media-downloader/releases/latest)
 
 ---
 
@@ -12,6 +12,7 @@ Current version: **3.1.4** — [Download installer](https://github.com/GH-Acho17
 - **Update mode** — fetch only new posts since the last run
 - **Full mode** — download everything, with optional day-range limit
 - **Auto mode** — scheduled background sync at a configurable interval (default 30 min); toggle from the dashboard, persists across restarts; suppresses history and popups when nothing new was downloaded
+- Progressive sleep between users — starts at 5 s and increases by 1 s per account (capped at 30 s) to avoid IP-level rate limits during large batch runs
 - Single video/post download by pasting a URL directly
 - Parallel downloads across platforms and configurable worker count
 - Organises downloads by creator: `downloads/{Creator}/{account}/`

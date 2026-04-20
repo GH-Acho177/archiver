@@ -1,5 +1,6 @@
 import io
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -65,9 +66,13 @@ class _LineWriter:
 class _TaskBuffer:
     """Collects a task's output into a StringIO; flush_to() dumps atomically."""
 
+    _FLUSH_INTERVAL = 3.0  # seconds between timed flushes
+
     def __init__(self):
-        self._sio  = io.StringIO()
-        self._buf  = ""          # partial line accumulator for prefixed writes
+        self._sio          = io.StringIO()
+        self._buf          = ""          # partial line accumulator for prefixed writes
+        self._flushed_pos  = 0
+        self._last_flush_t = time.monotonic()
 
     # Raw write — no prefix; use for header lines already formatted
     def write_raw(self, text: str):
@@ -84,12 +89,34 @@ class _TaskBuffer:
     def flush(self):
         pass
 
-    def flush_to(self, target, lock: threading.Lock):
-        content = self._sio.getvalue()
-        if content:
+    def _push_new(self, target, lock: threading.Lock):
+        all_content = self._sio.getvalue()
+        new_content = all_content[self._flushed_pos:]
+        if new_content:
             with lock:
-                target.write(content)
+                target.write(new_content)
                 target.flush()
+            self._flushed_pos  = len(all_content)
+            self._last_flush_t = time.monotonic()
+
+    def start_periodic_flush(self, target, lock: threading.Lock):
+        """Start a daemon thread that flushes new content every _FLUSH_INTERVAL seconds."""
+        self._stop_flush = threading.Event()
+        def _loop():
+            while not self._stop_flush.wait(timeout=self._FLUSH_INTERVAL):
+                self._push_new(target, lock)
+        threading.Thread(target=_loop, daemon=True).start()
+
+    def timed_flush_to(self, target, lock: threading.Lock):
+        """Push new content to target if the flush interval has elapsed."""
+        if time.monotonic() - self._last_flush_t >= self._FLUSH_INTERVAL:
+            self._push_new(target, lock)
+
+    def flush_to(self, target, lock: threading.Lock):
+        """Stop the periodic flush timer and push all remaining content."""
+        if hasattr(self, "_stop_flush"):
+            self._stop_flush.set()
+        self._push_new(target, lock)
 
 
 # ── Thread-local stdout router for parallel tasks ─────────────────────────────
