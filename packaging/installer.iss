@@ -1,13 +1,13 @@
-; Inno Setup script for Media Downloader
+; Inno Setup script for Archiver
 ; Download Inno Setup: https://jrsoftware.org/isinfo.php
 ; Compile:  Right-click this file → Compile  (or open in Inno Setup IDE)
 
-#define AppName      "Media Downloader"
-#define AppVersion   "2.1.2"
+#define AppName      "Archiver"
+#define AppVersion   "3.1.0"
 #define AppPublisher "GH-Acho177"
-#define AppExeName   "MediaDownloader.exe"
+#define AppExeName   "Archiver.exe"
 ; Install into user's AppData so no UAC prompt is needed
-#define DefaultInstDir "{localappdata}\MediaDownloader"
+#define DefaultInstDir "{localappdata}\Archiver"
 
 [Setup]
 AppId={{BA0057F9-834C-49A4-B889-3B01EFE23692}
@@ -21,7 +21,7 @@ DefaultGroupName={#AppName}
 AllowNoIcons=yes
 ; Output
 OutputDir=..\dist
-OutputBaseFilename=MediaDownloader_Setup_{#AppVersion}
+OutputBaseFilename=Archiver_Setup_{#AppVersion}
 ; Compression
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -45,7 +45,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; Main application (PyInstaller --onedir output)
-Source: "..\dist\MediaDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Archiver\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
 ; Create writable data directories alongside the install (user-space)
