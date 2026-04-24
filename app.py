@@ -231,6 +231,9 @@ class App(tk.Tk):
         self._tg_status_var: "tk.StringVar | None" = None
         self._tg_status_lbl: "tk.Label | None"     = None
         self._tg_pending:    "dict | None"         = None  # stateful conversation
+        self._tg_queue:      list                  = []    # queued (pid, url, chat_id)
+        self._tg_download_chat_id: "int | None"    = None  # chat_id for active bot download
+        self._tg_run_ok:     "bool | None"         = None  # outcome of last bot download
 
         Path("config").mkdir(exist_ok=True)
         Path("downloads").mkdir(exist_ok=True)
@@ -515,11 +518,14 @@ class App(tk.Tk):
                 f"Create a new creator for this account? (yes / no)",
             )
         else:
-            # Post URL — download immediately
+            # Post URL — download immediately or queue
             if self.running:
+                self._tg_queue.append((pid, url, chat_id))
+                pos = len(self._tg_queue)
                 self._tg_reply(chat_id,
-                               "⏳ A download is already running. Try again shortly.")
+                               f"⏳ Queued (position {pos}) — will start when the current download finishes.")
                 return
+            self._tg_download_chat_id = chat_id
             self._run_single_post(pid, url)
             self._tg_reply(chat_id, f"✓ Downloading ({PLATFORMS[pid]['label']})…")
 
@@ -3118,6 +3124,7 @@ class App(tk.Tk):
         self.status_var.set("Downloading post…")
 
         def worker():
+            _ok = [False]
             old_stdout = sys.stdout
             sys.stdout = TextRedirector(self.log, self)
             try:
@@ -3206,10 +3213,12 @@ class App(tk.Tk):
 
                 if not self.stop_flag.is_set():
                     print("\n✓ Done.")
+                    _ok[0] = True
             except Exception as exc:
                 print(f"\n[ERROR] {exc}")
             finally:
                 sys.stdout = old_stdout
+                self._tg_run_ok = _ok[0]
                 self.after(0, self._on_done)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3485,6 +3494,20 @@ class App(tk.Tk):
         if result:
             self._pending_run_result = None
             self._show_update_summary(result)
+        finished_chat = self._tg_download_chat_id
+        self._tg_download_chat_id = None
+        if finished_chat and self._tg_bot is not None:
+            if self._tg_run_ok:
+                self._tg_reply(finished_chat, "✓ Download complete.")
+            elif self.stop_flag.is_set():
+                self._tg_reply(finished_chat, "⏹ Download was stopped.")
+            else:
+                self._tg_reply(finished_chat, "✗ Download failed.")
+        if self._tg_queue:
+            pid, url, chat_id = self._tg_queue.pop(0)
+            self._tg_download_chat_id = chat_id
+            self._run_single_post(pid, url)
+            self._tg_reply(chat_id, f"✓ Downloading ({PLATFORMS[pid]['label']})…")
 
     # ── Cookie helpers ─────────────────────────────────────────────────────────
     def _browse_cookies(self, pid):

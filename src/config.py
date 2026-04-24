@@ -1,4 +1,4 @@
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.2"
 
 # ── Platform config ────────────────────────────────────────────────────────────
 PLATFORMS = {

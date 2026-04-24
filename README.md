@@ -2,7 +2,7 @@
 
 > A Windows desktop application for batch-downloading media from **X (Twitter)**, **Douyin (抖音)**, and **Bilibili**.
 
-[![Version](https://img.shields.io/badge/version-4.0.0-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-4.0.2-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -200,6 +200,14 @@ packaging/
 ---
 
 ## Changelog
+
+### v4.0.2
+- Douyin: increased `max_connections` and `max_tasks` from 5 → 10 for faster parallel downloads
+- Douyin: increased `page_counts` from 20 → 50 to reduce API listing round-trips
+
+### v4.0.1
+- Telegram bot queues URLs sent during an active download and processes them automatically when it finishes
+- Bot now replies with download result (complete / failed / stopped) after each bot-triggered download
 
 ### v4.0.0
 - Telegram bot account-sharing flow: send a profile URL from your phone to add it to a creator group
