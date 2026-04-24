@@ -26,6 +26,7 @@ Archiver lets you maintain a local archive of content from multiple social media
 | **Concurrency** | Parallel downloads across platforms with configurable worker count |
 | **Rate limiting** | Progressive inter-user sleep (5 s → 30 s) to avoid IP-level throttling |
 | **Authentication** | Per-platform Netscape cookies.txt import |
+| **Telegram bot** | Send a post or profile URL from your phone; downloads start on the PC instantly |
 | **UI** | Dark / light theme · English / Chinese · DPI-aware · System tray support |
 
 ---
@@ -64,6 +65,55 @@ For Douyin and Bilibili, paste the profile URL directly — the app extracts the
 - **Update** — fetches posts published since the last run.
 - **Full** — downloads the complete post history (optionally bounded by a date range).
 - **Auto** — runs Update silently on a timer; toggle from the dashboard.
+
+---
+
+## Telegram Bot
+
+The Telegram bot lets you trigger downloads from your phone without touching the PC.
+
+### Setup
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
+2. In Archiver: **Settings → Telegram Bot → paste the token → Save & Start**.
+3. Send your first message to the bot — your Telegram user ID is whitelisted automatically.
+
+### Sending a Post URL
+
+Send any post link (X, Douyin, or Bilibili) and the download starts on the PC immediately.
+
+Supported formats:
+- Direct URLs: `https://x.com/user/status/…`, `https://www.bilibili.com/video/…`
+- Douyin short links: `https://v.douyin.com/XXXXX/`
+- Douyin share blurbs: the full copied text (e.g. `6.92 复制打开抖音… https://v.douyin.com/…`) — the URL is extracted automatically
+- Short links with UTM parameters (e.g. `https://b23.tv/…?utm_…`) — resolved before routing
+
+### Adding an Account via Bot
+
+Send a **profile URL** instead of a post URL and the bot starts a guided flow:
+
+```
+You  →  https://v.douyin.com/XXXXX/          (profile share link)
+Bot  ←  📋 抖音 account: 可可
+         Create a new creator for this account? (yes / no)
+
+You  →  yes
+Bot  ←  ✓ Created creator '可可' and added the account.
+
+— or —
+
+You  →  no
+Bot  ←  Choose a creator:
+         1. Creator A
+         2. Creator B
+
+You  →  2
+Bot  ←  ✓ Added to 'Creator B'.
+```
+
+Send `/cancel` at any point to abort the flow.
+
+The bot resolves short links and fetches the account's display name automatically for all three platforms.
 
 ---
 
@@ -137,6 +187,7 @@ src/
 helpers/
   f2_user.py              # Douyin batch downloader
   f2_one.py               # Douyin single-post downloader
+  tg_bot.py               # Telegram bot (stdlib urllib, no SDK)
 assets/
   icon.ico
 packaging/
