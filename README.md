@@ -94,11 +94,11 @@ Send a **profile URL** instead of a post URL and the bot starts a guided flow:
 
 ```
 You  →  https://v.douyin.com/XXXXX/          (profile share link)
-Bot  ←  📋 抖音 account: 可可
+Bot  ←  📋 抖音 account: <display name>
          Create a new creator for this account? (yes / no)
 
 You  →  yes
-Bot  ←  ✓ Created creator '可可' and added the account.
+Bot  ←  ✓ Created creator '<display name>' and added the account.
 
 — or —
 
