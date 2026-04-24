@@ -57,15 +57,24 @@ async def download_user(
     user_path = Path(outdir)
     user_path.mkdir(parents=True, exist_ok=True)
 
+    existing_ids = {
+        p.stem.rsplit("_", 1)[-1]
+        for p in user_path.iterdir()
+        if p.is_file()
+    } if user_path.exists() else set()
+
     async for aweme_data_list in handler.fetch_user_post_videos(
         sec_user_id, min_cursor, max_cursor,
         kwargs["page_counts"], kwargs["max_counts"]
     ):
         if stop_check and stop_check():
             break
-        await handler.downloader.create_download_tasks(
-            kwargs, aweme_data_list._to_list(), user_path
-        )
+        items = [item for item in aweme_data_list._to_list()
+                 if str(item.get("aweme_id", "")) not in existing_ids]
+        if items:
+            await handler.downloader.create_download_tasks(
+                kwargs, items, user_path
+            )
 
 
 async def main() -> None:

@@ -9,26 +9,54 @@ from src.config import _LOG_TAGS
 
 # ── Thread-safe stdout → Text widget ──────────────────────────────────────────
 class TextRedirector:
+    """
+    Collects writes from background threads into a list, then flushes them to
+    the Text widget in a single batched operation every _FLUSH_MS milliseconds.
+    Replacing the old per-write after(0) approach, which flooded the tkinter
+    event queue and made the UI unresponsive during heavy download output.
+    """
+    _FLUSH_MS = 50
+
     def __init__(self, widget, app):
-        self.widget = widget
-        self.app    = app
+        self.widget   = widget
+        self.app      = app
+        self._pending: list[str] = []  # list.append is GIL-atomic; no lock needed
+        self._schedule_flush()
 
     def write(self, text):
-        self.app.after(0, self._append, text)
+        self._pending.append(text)
 
-    def _append(self, text):
-        widget = self.widget
-        widget.configure(state="normal")
+    def _schedule_flush(self):
+        try:
+            self.app.after(self._FLUSH_MS, self._flush)
+        except Exception:
+            pass
 
-        tag = ""
-        for t, keywords in _LOG_TAGS.items():
-            if any(k in text for k in keywords):
-                tag = t
-                break
-
-        widget.insert(tk.END, text, tag if tag else ())
-        widget.see(tk.END)
-        widget.configure(state="disabled")
+    def _flush(self):
+        if self._pending:
+            pending, self._pending = self._pending, []
+            text = "".join(pending)
+            widget = self.widget
+            widget.configure(state="normal")
+            untagged: list[str] = []
+            for line in text.splitlines(keepends=True):
+                tag = ""
+                for t, keywords in _LOG_TAGS.items():
+                    if any(k in line for k in keywords):
+                        tag = t
+                        break
+                if tag:
+                    if untagged:
+                        widget.insert(tk.END, "".join(untagged))
+                        untagged.clear()
+                    widget.insert(tk.END, line, tag)
+                else:
+                    untagged.append(line)
+            if untagged:
+                widget.insert(tk.END, "".join(untagged))
+            widget.see(tk.END)
+            widget.configure(state="disabled")
+        self._schedule_flush()
 
     def flush(self):
         pass

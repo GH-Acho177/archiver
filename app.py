@@ -226,6 +226,12 @@ class App(tk.Tk):
         self._scheduler_thread: "threading.Thread|None" = None
         self._scheduler_next_at: float                  = 0.0
 
+        # Telegram bot state — must be set before _build_ui() which reads _tg_bot
+        self._tg_bot:        "object | None"       = None
+        self._tg_status_var: "tk.StringVar | None" = None
+        self._tg_status_lbl: "tk.Label | None"     = None
+        self._tg_pending:    "dict | None"         = None  # stateful conversation
+
         Path("config").mkdir(exist_ok=True)
         Path("downloads").mkdir(exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
@@ -241,6 +247,12 @@ class App(tk.Tk):
 
         self._tray_icon: "pystray.Icon | None" = None
         self._setup_tray()
+
+        # Start bot if a token was previously saved
+        _tg_token = self._load_setting("telegram_token", "")
+        if _tg_token:
+            self._start_tg_bot(_tg_token)
+
         self.deiconify()            # show now that layout is complete
         self._apply_titlebar_theme()
 
@@ -302,7 +314,267 @@ class App(tk.Tk):
         """Stop the tray icon (from its own thread if coming from menu) then exit."""
         if icon is not None:
             icon.stop()
+        if self._tg_bot is not None:
+            self._tg_bot.stop()
         self.after(0, self.destroy)
+
+    # ── Telegram bot ───────────────────────────────────────────────────────────
+    def _start_tg_bot(self, token: str):
+        import tg_bot as _tg_mod
+        if self._tg_bot is not None:
+            self._tg_bot.stop()
+        self._tg_bot = _tg_mod.TelegramBot(
+            token,
+            on_message=self._on_tg_message,
+            on_error=self._on_tg_error,
+            on_log=lambda t: self.after(0, self.log_write, t),
+        )
+        self._tg_bot.start()
+        self._tg_set_status("running")
+
+    def _stop_tg_bot(self):
+        if self._tg_bot is not None:
+            self._tg_bot.stop()
+            self._tg_bot = None
+        self._tg_set_status("stopped")
+
+    def _tg_set_status(self, state: str):
+        _labels = {
+            "running": ("●  Running",       "#4ec94e"),
+            "stopped": ("●  Stopped",       "#888888"),
+            "error":   ("●  Invalid token", "#ff6b6b"),
+        }
+        text, color = _labels.get(state, _labels["stopped"])
+        if self._tg_status_var is not None:
+            self._tg_status_var.set(text)
+        if self._tg_status_lbl is not None:
+            try:
+                self._tg_status_lbl.configure(fg=color)
+            except Exception:
+                pass
+
+    def _on_tg_message(self, text: str, chat_id: int, user_id: int):
+        """Called from the bot's poll thread — marshal everything to the main thread."""
+        allowed = self._load_setting("telegram_allowed_id", None)
+        if allowed is None:
+            self._save_setting("telegram_allowed_id", user_id)
+            allowed = user_id
+        if user_id != int(allowed):
+            return  # silently ignore unknown senders
+        self.after(0, self._dispatch_tg, text, chat_id)
+
+    def _on_tg_error(self, reason: str):
+        self.after(0, self._tg_set_status, "error")
+
+    def _tg_reply(self, chat_id: int, text: str):
+        """Send a Telegram reply in a background thread and log the outcome."""
+        def _send():
+            ok, err = self._tg_bot.send_message(chat_id, text)
+            if not ok:
+                self.after(0, self.log_write, f"[Bot] Reply failed: {err}\n")
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _dispatch_tg(self, text: str, chat_id: int):
+        """Route incoming message: stateful reply or fresh URL."""
+        if text.strip().lower() in ("/cancel", "cancel"):
+            self._tg_pending = None
+            self._tg_reply(chat_id, "Cancelled.")
+            return
+        if self._tg_pending is not None:
+            self._handle_tg_reply(text, chat_id)
+        else:
+            self._handle_tg_url(text, chat_id)
+
+    def _handle_tg_url(self, text: str, chat_id: int):
+        """Main thread — parse URL, then hand off to bg thread for resolution."""
+        self.log_write(f"[Bot] Received: {text}\n")
+        try:
+            url = self._extract_url(text)
+            pid = self._detect_platform_from_url(url)
+            if pid is None:
+                self._tg_reply(chat_id,
+                               "⚠ Unrecognised URL.\n"
+                               "Send a Douyin, X (Twitter), or Bilibili link.")
+                return
+            # Resolve short URL and route (profile vs post) in a background thread
+            threading.Thread(
+                target=self._tg_resolve_and_route,
+                args=(pid, url, chat_id),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            self.log_write(f"[Bot] Error: {exc}\n")
+            self._tg_reply(chat_id, f"⚠ Internal error: {exc}")
+
+    def _tg_resolve_and_route(self, pid: str, url: str, chat_id: int):
+        """Background thread — follow any redirect, then dispatch on main thread."""
+        resolved = url
+        if any(x in url for x in ("v.douyin.com", "iesdouyin.com", "b23.tv")):
+            try:
+                import urllib.request as _ur
+                _req = _ur.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 "
+                                           "like Mac OS X) AppleWebKit/605.1.15"},
+                )
+                with _ur.urlopen(_req, timeout=10) as _r:
+                    resolved = _r.geturl()
+                self.after(0, self.log_write, f"[Bot] Resolved: {resolved}\n")
+            except Exception as exc:
+                self.after(0, self.log_write, f"[Bot] Resolve failed: {exc}\n")
+
+        # For Douyin profiles, fetch the display name while still in the bg thread
+        display_name = None
+        account_id = self._parse_profile_url(pid, resolved)
+        if pid == "douyin" and account_id is not None:
+            try:
+                import asyncio as _aio
+                from f2.apps.douyin.handler import DouyinHandler
+                from f2.apps.douyin.utils import ClientConfManager
+                _ck: dict = {}
+                cf = Path(PLATFORMS["douyin"]["cookies_file"])
+                if cf.exists():
+                    for line in cf.read_text(encoding="utf-8").splitlines():
+                        if line.startswith("#") or not line.strip():
+                            continue
+                        fields = line.split("\t")
+                        if len(fields) >= 7:
+                            _ck[fields[5].strip()] = fields[6].strip()
+                _kw = {
+                    "cookie":          "; ".join(f"{k}={v}" for k, v in _ck.items()),
+                    "headers":         ClientConfManager.headers(),
+                    "path":            ".", "mode": "post",
+                    "naming":          "{create:.10}_{aweme_id}",
+                    "languages":       "en_US", "timeout": 10,
+                    "max_retries":     2, "max_connections": 5,
+                    "max_tasks":       5, "page_counts": 20, "max_counts": None,
+                }
+                async def _af():
+                    return (await DouyinHandler(_kw).fetch_user_profile(account_id)).nickname_raw
+                display_name = _aio.run(_af()) or None
+            except Exception as exc:
+                self.after(0, self.log_write, f"[Bot] Nickname fetch failed: {exc}\n")
+
+        if pid == "bilibili" and account_id is not None and display_name is None:
+            try:
+                import http.client as _hc, ssl as _ssl, json as _json
+                _ctx  = _ssl.create_default_context()
+                _conn = _hc.HTTPSConnection("api.bilibili.com", timeout=10, context=_ctx)
+                _conn.request("GET", f"/x/web-interface/card?mid={account_id}",
+                              headers={"User-Agent": "Mozilla/5.0",
+                                       "Referer": "https://www.bilibili.com/",
+                                       "Accept": "application/json"})
+                _data = _json.loads(_conn.getresponse().read())
+                _conn.close()
+                if _data.get("code") == 0:
+                    display_name = (_data.get("data") or {}).get("card", {}).get("name") or None
+            except Exception as exc:
+                self.after(0, self.log_write, f"[Bot] Bilibili name fetch failed: {exc}\n")
+
+        if pid == "x" and account_id is not None and display_name is None:
+            try:
+                import subprocess as _sp, json as _json2
+                _cf  = Path(PLATFORMS["x"]["cookies_file"])
+                _cmd = [GDL, "--simulate", "--dump-json", "--range", "1"]
+                if _cf.exists():
+                    _cmd += ["--cookies", str(_cf)]
+                _cmd.append(f"https://x.com/{account_id}/media")
+                _res = _sp.run(_cmd, capture_output=True, text=True, timeout=20)
+                _data = _json2.loads(_res.stdout)
+                for _entry in (_data if isinstance(_data, list) else [_data]):
+                    _item = _entry[1] if (isinstance(_entry, list) and len(_entry) > 1) else _entry
+                    _author = _item.get("author") or {}
+                    _name = ((_author.get("nick") if isinstance(_author, dict) else None) or
+                             (_item.get("user") or {}).get("nick") or
+                             _item.get("user_name") or _item.get("full_name"))
+                    if _name:
+                        display_name = _name
+                        break
+            except Exception as exc:
+                self.after(0, self.log_write, f"[Bot] X name fetch failed: {exc}\n")
+
+        self.after(0, self._tg_route_url, pid, resolved, chat_id, display_name)
+
+    def _tg_route_url(self, pid: str, url: str, chat_id: int, display_name: "str | None" = None):
+        """Main thread — decide if url is a profile or a post and act."""
+        account_id = self._parse_profile_url(pid, url)
+        if account_id is not None:
+            # Profile URL — start creator-assignment conversation
+            label = display_name or account_id
+            self._tg_pending = {
+                "state":        "confirm_creator",
+                "pid":          pid,
+                "account_id":   account_id,
+                "display_name": label,
+                "chat_id":      chat_id,
+            }
+            platform_label = PLATFORMS[pid]["label"]
+            self._tg_reply(
+                chat_id,
+                f"📋 {platform_label} account: {label}\n\n"
+                f"Create a new creator for this account? (yes / no)",
+            )
+        else:
+            # Post URL — download immediately
+            if self.running:
+                self._tg_reply(chat_id,
+                               "⏳ A download is already running. Try again shortly.")
+                return
+            self._run_single_post(pid, url)
+            self._tg_reply(chat_id, f"✓ Downloading ({PLATFORMS[pid]['label']})…")
+
+    def _handle_tg_reply(self, text: str, chat_id: int):
+        """Main thread — handle a reply within an active conversation."""
+        state = self._tg_pending["state"]
+        t     = text.strip().lower()
+
+        if state == "confirm_creator":
+            if t in ("yes", "y", "是", "1"):
+                pid          = self._tg_pending["pid"]
+                account_id   = self._tg_pending["account_id"]
+                display_name = self._tg_pending.get("display_name") or account_id
+                handle       = f"{display_name}|{account_id}" if display_name and display_name != account_id else account_id
+                creator      = self._store.add_creator(display_name)
+                self._store.add_entry(pid, handle, creator.id)
+                self._tg_pending = None
+                self._refresh_creator_list()
+                self._tg_reply(chat_id,
+                               f"✓ Created creator '{display_name}' and added the account.")
+            elif t in ("no", "n", "否", "0"):
+                creators = self._store.all_creators()
+                if not creators:
+                    self._tg_pending = None
+                    self._tg_reply(chat_id,
+                                   "No creators yet — reply 'yes' to create one.")
+                    return
+                lines = [f"{i + 1}. {c.name}" for i, c in enumerate(creators)]
+                self._tg_pending["state"]       = "pick_creator"
+                self._tg_pending["creator_ids"] = [c.id for c in creators]
+                self._tg_reply(chat_id,
+                               "Choose a creator:\n\n" + "\n".join(lines))
+            else:
+                self._tg_reply(chat_id, "Reply yes or no (or 'cancel' to abort).")
+
+        elif state == "pick_creator":
+            try:
+                idx   = int(text.strip()) - 1
+                cids  = self._tg_pending["creator_ids"]
+                if not 0 <= idx < len(cids):
+                    raise ValueError
+                pid          = self._tg_pending["pid"]
+                account_id   = self._tg_pending["account_id"]
+                display_name = self._tg_pending.get("display_name") or account_id
+                handle       = f"{display_name}|{account_id}" if display_name and display_name != account_id else account_id
+                creator      = self._store.get_creator(cids[idx])
+                self._store.add_entry(pid, handle, creator.id)
+                self._tg_pending = None
+                self._refresh_creator_list()
+                self._tg_reply(chat_id, f"✓ Added to '{creator.name}'.")
+            except (ValueError, TypeError):
+                n = len(self._tg_pending["creator_ids"])
+                self._tg_reply(chat_id,
+                               f"Reply with a number between 1 and {n} "
+                               f"(or 'cancel' to abort).")
 
     # ── Legacy migration ───────────────────────────────────────────────────────
     @staticmethod
@@ -1120,6 +1392,49 @@ class App(tk.Tk):
             font=FONTS["small"], bg=c["bg"], fg=c["text_dim"])
 
         self._refresh_downloads_list()
+
+    @staticmethod
+    def _extract_url(text: str) -> str:
+        """
+        Extract the first URL from arbitrary text.
+        Handles Douyin/WeChat share blurbs that wrap the link in Chinese prose.
+        For v.douyin.com short links the path is truncated to the first segment
+        so trailing tracking codes (e.g. '/TYm:/02/26') don't corrupt the URL.
+        """
+        import re as _re
+        m = _re.search(r'https?://\S+', text)
+        if not m:
+            return text.strip()
+        url = m.group(0)
+        # Douyin short URL — keep only scheme + host + first path token
+        dy = _re.match(r'(https?://v\.douyin\.com/[A-Za-z0-9_\-]+/?)', url)
+        if dy:
+            return dy.group(1).rstrip('/') + '/'
+        # Generic: strip trailing punctuation that cannot be part of a URL
+        return _re.sub(r'[^\w/\-._~:?#\[\]@!$&\'()*+,;=%]+$', '', url)
+
+    @staticmethod
+    def _parse_profile_url(pid: str, url: str) -> "str | None":
+        """Return the bare account ID if url is a profile page, else None (post)."""
+        import re as _re
+        if pid == "x":
+            m = _re.match(r'https?://(?:x|twitter)\.com/([A-Za-z0-9_]+)/?(?:\?.*)?$', url)
+            _skip = {"i", "home", "explore", "notifications", "messages", "search"}
+            if m and m.group(1).lower() not in _skip:
+                return m.group(1)
+        elif pid == "bilibili":
+            m = (_re.match(r'https?://space\.bilibili\.com/(\d+)', url) or
+                 _re.match(r'https?://m\.bilibili\.com/space/(\d+)', url))
+            if m:
+                return m.group(1)
+        elif pid == "douyin":
+            m = _re.match(
+                r'https?://(?:[\w-]+\.)?(?:douyin\.com/user|iesdouyin\.com/share/user)/([^/?#]+)',
+                url,
+            )
+            if m:
+                return m.group(1)
+        return None
 
     def _detect_platform_from_url(self, url: str) -> "str | None":
         _MAP = [
@@ -2536,6 +2851,58 @@ class App(tk.Tk):
                        style="Danger.TButton", command=self._reset_db),
             "btn.reset_db").grid(row=1, column=0, sticky="w", pady=(0, 2))
 
+        # ── Telegram Bot ─────────────────────────────────────────────────────
+        tgc = _card(
+            "Telegram Bot",
+            hint="Send Douyin, X, or Bilibili URLs from your phone to queue downloads. "
+                 "Create a bot via @BotFather on Telegram, paste the token below, "
+                 "then tap Save & Start. The first message you send whitelists your account.",
+        )
+
+        tg_token_var = tk.StringVar(value=self._load_setting("telegram_token", ""))
+        tg_entry = ttk.Entry(tgc, textvariable=tg_token_var,
+                             font=FONTS["mono"], width=34, show="•")
+
+        def _toggle_show():
+            tg_entry.configure(show="" if tg_entry.cget("show") == "•" else "•")
+
+        _row(tgc, 0, "Bot token", tg_entry,
+             action=ttk.Button(tgc, text="Show", style="Secondary.TButton",
+                               width=5, command=_toggle_show))
+        _sep(tgc, 1)
+
+        self._tg_status_var = tk.StringVar(
+            value="●  Running" if self._tg_bot is not None else "●  Stopped"
+        )
+        _tg_color = "#4ec94e" if self._tg_bot is not None else "#888888"
+        self._tg_status_lbl = tk.Label(
+            tgc, textvariable=self._tg_status_var,
+            font=FONTS["small"], bg=c["panel"], fg=_tg_color, anchor="w",
+        )
+        self._tg_status_lbl.grid(row=2, column=0, columnspan=2,
+                                 sticky="w", pady=ROW_PAD)
+
+        def _save_start():
+            token = tg_token_var.get().strip()
+            self._save_setting("telegram_token", token)
+            if token:
+                self._start_tg_bot(token)
+            else:
+                self._stop_tg_bot()
+
+        def _stop_clear():
+            self._stop_tg_bot()
+            self._save_setting("telegram_token", "")
+            self._save_setting("telegram_allowed_id", None)
+            tg_token_var.set("")
+
+        btn_frame = tk.Frame(tgc, bg=c["panel"])
+        btn_frame.grid(row=2, column=3, sticky="e", pady=ROW_PAD)
+        ttk.Button(btn_frame, text="Save & Start",
+                   command=_save_start).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(btn_frame, text="Stop", style="Secondary.TButton",
+                   command=_stop_clear).pack(side=tk.LEFT)
+
         # ── About (dim footer) ────────────────────────────────────────────────
         import webbrowser as _wb
         about_f = tk.Frame(outer, bg=c["bg"])
@@ -2764,6 +3131,22 @@ class App(tk.Tk):
                 if pid == "douyin" or cfg.get("downloader") == "f2":
                     from urllib.parse import urlparse, parse_qs
                     import re as _re
+                    # Resolve short URLs (v.douyin.com) via HTTP redirect
+                    if "v.douyin.com" in _url or "iesdouyin.com" in _url:
+                        try:
+                            import urllib.request as _urlreq
+                            _req = _urlreq.Request(
+                                _url,
+                                headers={"User-Agent":
+                                         "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 "
+                                         "like Mac OS X) AppleWebKit/605.1.15"},
+                            )
+                            with _urlreq.urlopen(_req, timeout=10) as _resp:
+                                _url = _resp.geturl()
+                            print(f"Resolved : {_url}\n")
+                        except Exception as _e:
+                            print(f"[ERROR] Could not resolve short URL: {_e}")
+                            return
                     _qs = parse_qs(urlparse(_url).query)
                     if "modal_id" in _qs:
                         aweme_id = _qs["modal_id"][0]
@@ -3438,12 +3821,30 @@ class App(tk.Tk):
                         corrupt = self._scan_corrupt(_user_dl_folder)
                         if corrupt:
                             corrupt_count = len(corrupt)
+                            re_dl_count = 0
+                            import f2_one as _f2_one
                             for f in corrupt:
-                                _outp(f"⚠ Corrupt ({f.stat().st_size:,} B): {f.name} — deleted")
+                                _outp(f"⚠ Corrupt ({f.stat().st_size:,} B): {f.name} — deleted, retrying…")
                                 f.unlink(missing_ok=True)
-                            hint = "will re-download now" if is_full else "run Full mode to re-download"
-                            _outp(f"→ {corrupt_count} corrupt file(s) removed ({hint})")
-                            new_count = max(0, new_count - corrupt_count)
+                                if f.suffix.lower() in _MEDIA_EXTS and not self.stop_flag.is_set():
+                                    aweme_id = f.stem.rsplit("_", 1)[-1]
+                                    try:
+                                        asyncio.run(_f2_one.download_one(
+                                            aweme_id, cookie_str, str(_user_dl_folder),
+                                            "{create:.10}_{aweme_id}",
+                                        ))
+                                        re_dl = [p for p in _user_dl_folder.glob(f"*_{aweme_id}.*")
+                                                 if p.is_file() and p.stat().st_size > 0]
+                                        if re_dl:
+                                            re_dl_count += 1
+                                            _outp(f"  ✓ Re-downloaded: {re_dl[0].name}")
+                                            new_names.append(re_dl[0].name)
+                                        else:
+                                            _outp(f"  ✗ Re-download failed for {aweme_id}")
+                                    except Exception as _exc:
+                                        _outp(f"  ✗ Re-download error ({aweme_id}): {_exc}")
+                            _outp(f"→ {corrupt_count} corrupt file(s) removed, {re_dl_count} re-downloaded")
+                            new_count = max(0, new_count - corrupt_count) + re_dl_count
 
                         if user_suspended:
                             _out(f"  ⚠ {display} appears suspended/deleted — will be removed")
@@ -3789,13 +4190,67 @@ class App(tk.Tk):
 
     # ── Integrity scan ─────────────────────────────────────────────────────────
     @staticmethod
+    def _mp4_is_complete(path: Path) -> bool:
+        """Walk MP4/MOV/M4V top-level boxes; return False if any box is truncated or moov is absent."""
+        _MP4_EXTS = frozenset({".mp4", ".m4v", ".mov"})
+        if path.suffix.lower() not in _MP4_EXTS:
+            return True
+        try:
+            file_size = path.stat().st_size
+            if file_size < 8:
+                return False
+            has_moov = False
+            with path.open("rb") as fh:
+                offset = 0
+                while offset < file_size:
+                    if offset + 8 > file_size:
+                        return False  # truncated box header
+                    fh.seek(offset)
+                    raw = fh.read(8)
+                    if len(raw) < 8:
+                        return False
+                    box_size = int.from_bytes(raw[:4], "big")
+                    box_type = raw[4:8]
+                    if box_type == b"moov":
+                        has_moov = True
+                    if box_size == 0:
+                        break  # last box extends to EOF — valid
+                    if box_size == 1:
+                        # 64-bit extended size
+                        if offset + 16 > file_size:
+                            return False
+                        fh.seek(offset + 8)
+                        box_size = int.from_bytes(fh.read(8), "big")
+                        if box_size < 16:
+                            return False
+                    elif box_size < 8:
+                        return False  # invalid box
+                    if offset + box_size > file_size:
+                        return False  # box extends past EOF — truncated download
+                    offset += box_size
+            return has_moov
+        except Exception:
+            return False
+
+    @staticmethod
     def _scan_corrupt(folder: Path) -> list:
-        """Return media files that are 0 bytes (guaranteed corrupt/partial)."""
+        """Return media files that are 0 bytes or structurally incomplete."""
         bad = []
         if not folder.exists():
             return bad
         for f in folder.iterdir():
-            if f.is_file() and f.suffix.lower() in _MEDIA_EXTS and f.stat().st_size == 0:
+            if not f.is_file():
+                continue
+            # Clean up leftover partial-download stubs regardless of extension
+            if f.suffix.lower() in {".part", ".tmp"}:
+                bad.append(f)
+                continue
+            if f.suffix.lower() not in _MEDIA_EXTS:
+                continue
+            size = f.stat().st_size
+            if size == 0:
+                bad.append(f)
+            elif not App._mp4_is_complete(f):
                 bad.append(f)
         return bad
 
