@@ -3,12 +3,9 @@
 ; Compile:  Right-click this file → Compile  (or open in Inno Setup IDE)
 
 #define AppName      "Archiver"
-#define AppVersion   "4.0.3"
+#define AppVersion   "4.0.4"
 #define AppPublisher "GH-Acho177"
 #define AppExeName   "Archiver.exe"
-; Install into user's AppData so no UAC prompt is needed
-#define DefaultInstDir "{localappdata}\Archiver"
-
 [Setup]
 AppId={{F924C0FB-92D2-412D-8792-EB7D7AEDA9A1}
 AppName={#AppName}
@@ -16,7 +13,7 @@ AppVersion={#AppVersion}
 AppPublisherURL="https://github.com/GH-Acho177"
 AppSupportURL="https://github.com/GH-Acho177"
 AppUpdatesURL="https://github.com/GH-Acho177"
-DefaultDirName={#DefaultInstDir}
+DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 ; Output
@@ -27,8 +24,7 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 ; Windows 10+ only (Sun Valley theme requires it)
 MinVersion=10.0
-; No UAC required — installs to user AppData
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 ; Appearance
 WizardStyle=modern
 ; Icon (comment out if you have no icon.ico yet)
