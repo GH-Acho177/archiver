@@ -2898,9 +2898,6 @@ class App(tk.Tk):
 
         def _stop_clear():
             self._stop_tg_bot()
-            self._save_setting("telegram_token", "")
-            self._save_setting("telegram_allowed_id", None)
-            tg_token_var.set("")
 
         btn_frame = tk.Frame(tgc, bg=c["panel"])
         btn_frame.grid(row=2, column=3, sticky="e", pady=ROW_PAD)
@@ -4443,6 +4440,9 @@ class App(tk.Tk):
                 display  = u.get("display",  "")
                 u_pid  = u.get("platform", "")
                 u_pcfg = PLATFORMS.get(u_pid, {})
+
+                if not count and not corrupt and not files:
+                    continue
 
                 row = tk.Frame(body, bg=BG)
                 row.pack(fill=tk.X, padx=10, pady=1)
