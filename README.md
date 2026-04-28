@@ -2,7 +2,7 @@
 
 > A Windows desktop application for batch-downloading media from **X (Twitter)**, **Douyin**, and **Bilibili**.
 
-[![Version](https://img.shields.io/badge/version-4.0.5-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-4.0.6-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -192,6 +192,12 @@ packaging/
 ---
 
 ## Release Notes
+
+### v4.0.6
+- Accounts panel: circular avatar tiles now open a Posts dialog on click, showing all downloaded posts with gone posts marked in red
+- Ghost check integrated directly into the Posts dialog — no separate window
+- Fixed X (Twitter) avatar fetching by switching to gallery-dl JSON output instead of the deprecated guest token API
+- Hover ring on account tiles uses the platform's accent color; Douyin uses black
 
 ### v4.0.5
 - Fixed: pasting an X (Twitter) profile URL when adding an account now correctly extracts the username instead of storing the full URL as the display name (affected both the quick-add bar and the Add Account dialog)

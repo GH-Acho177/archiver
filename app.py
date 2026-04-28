@@ -43,7 +43,7 @@ if _HELPERS_DIR not in sys.path:
 from src.config import (
     APP_VERSION, PLATFORMS, SETTINGS_FILE, DOUYIN_LAST_RUN, UPDATE_HISTORY_FILE,
     DOWNLOAD_PATH_FILE, LANG_FILE, GDL, ACCENT, _MEDIA_EXTS,
-    THEME_COLORS, FONTS, _LOG_TAGS, STRINGS,
+    THEME_COLORS, FONTS, _LOG_TAGS, STRINGS, POST_INDEX_FILE,
 )
 from src.creator_store import CreatorStore
 from src.utils import TextRedirector, _LineWriter, _TaskBuffer, _ThreadRouter, _del
@@ -54,6 +54,12 @@ try:
     _TRAY_AVAILABLE = True
 except ImportError:
     _TRAY_AVAILABLE = False
+
+try:
+    from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageTk as _PILTk
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 # ── Bundle font loading ────────────────────────────────────────────────────────
 def _load_bundled_fonts(tk_root=None):
@@ -76,6 +82,25 @@ def _read_download_dir() -> Path:
         if custom:
             return Path(custom)
     return Path("downloads")
+
+
+def _extract_post_id_and_date(pid: str, filename: str):
+    """Return (post_id, date_str) parsed from a downloaded filename, or (None, None).
+
+    Filename conventions:
+      x / douyin  : YYYY-MM-DD_<post_id>[.ext]   (rsplit on last underscore)
+      bilibili    : YYYY-MM-DD_<post_id>_<title>[.ext]  (split on first two underscores)
+    """
+    stem = Path(filename).stem
+    if pid in ("x", "douyin"):
+        parts = stem.rsplit("_", 1)
+        if len(parts) == 2:
+            return parts[1], parts[0][:10]
+    elif pid == "bilibili":
+        parts = stem.split("_", 2)
+        if len(parts) >= 2:
+            return parts[1], parts[0]
+    return None, None
 
 
 # Sentinel — means "cursor is not over any valid drop target"
@@ -236,11 +261,13 @@ class App(tk.Tk):
         self._tg_run_ok:     "bool | None"         = None  # outcome of last bot download
 
         Path("config").mkdir(exist_ok=True)
+        Path("config/avatars").mkdir(exist_ok=True)
         Path("downloads").mkdir(exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
         self._migrate_legacy_files()
         self._store = CreatorStore()
         self._store.migrate_from_legacy(PLATFORMS)
+        threading.Thread(target=self._retroactive_index_scan, daemon=True).start()
         self._load_platform_icons()
         self._build_ui()
         self._refresh_from_date()
@@ -671,6 +698,522 @@ class App(tk.Tk):
     # ── Download dir ───────────────────────────────────────────────────────────
     def _get_download_dir(self) -> Path:
         return _read_download_dir()
+
+    # ── Avatar helpers ─────────────────────────────────────────────────────────
+    def _make_circle_photo(self, path: Path, diameter: int, bg_hex: str):
+        """Crop an image file to a circle and return a Tk PhotoImage."""
+        if not _PIL_AVAILABLE:
+            return None
+        try:
+            img  = _PILImg.open(str(path)).convert("RGBA").resize(
+                (diameter, diameter), _PILImg.LANCZOS)
+            mask = _PILImg.new("L", (diameter, diameter), 0)
+            _PILDraw.Draw(mask).ellipse((0, 0, diameter - 1, diameter - 1), fill=255)
+            r, g, b = (int(bg_hex.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            bg = _PILImg.new("RGBA", (diameter, diameter), (r, g, b, 255))
+            bg.paste(img, mask=mask)
+            return _PILTk.PhotoImage(bg.convert("RGB"))
+        except Exception:
+            return None
+
+    def _fetch_avatar(self, plat: str, account_id: str) -> "Path | None":
+        """Background: download avatar image and cache it; return local path or None."""
+        cache = Path("config/avatars") / f"{plat}_{account_id}.png"
+        if cache.exists():
+            return cache
+        try:
+            import ssl as _ssl, urllib.request as _ulr, json as _j
+            import http.client as _hc
+            ctx = _ssl.create_default_context()
+            url = None
+
+            if plat == "bilibili":
+                conn = _hc.HTTPSConnection("api.bilibili.com", timeout=8, context=ctx)
+                conn.request("GET", f"/x/web-interface/card?mid={account_id}",
+                             headers={"User-Agent": "Mozilla/5.0",
+                                      "Referer": "https://www.bilibili.com/"})
+                data = _j.loads(conn.getresponse().read())
+                conn.close()
+                url = (data.get("data") or {}).get("card", {}).get("face")
+
+            elif plat == "x":
+                cf = Path(PLATFORMS["x"]["cookies_file"])
+                if not cf.exists():
+                    return None
+                import subprocess as _sp2
+                r = _sp2.run(
+                    [GDL, "--cookies", str(cf), "--simulate", "--dump-json",
+                     "--range", "1",
+                     f"https://x.com/{account_id}/media"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=30,
+                    creationflags=_sp2.CREATE_NO_WINDOW,
+                )
+                import re as _re2
+                try:
+                    # gallery-dl -j outputs one JSON array for the whole run.
+                    # Each element is [count, {meta}] or [count, "file_url", {meta}].
+                    entries = _j.loads(r.stdout)
+                    for entry in entries:
+                        if not isinstance(entry, list):
+                            continue
+                        meta = None
+                        if len(entry) == 3 and isinstance(entry[2], dict):
+                            meta = entry[2]
+                        elif len(entry) == 2 and isinstance(entry[1], dict):
+                            meta = entry[1]
+                        if meta is None:
+                            continue
+                        user = meta.get("user") or meta.get("author") or {}
+                        raw  = (user.get("profile_image") or
+                                user.get("profile_image_url_https") or "")
+                        if raw:
+                            url = _re2.sub(r"_normal\.", "_400x400.", raw)
+                            break
+                except Exception:
+                    pass
+
+            elif plat == "douyin":
+                cf = Path(PLATFORMS["douyin"]["cookies_file"])
+                if not cf.exists():
+                    return None
+                import asyncio as _aio
+                from f2.apps.douyin.handler import DouyinHandler
+                from f2.apps.douyin.utils import ClientConfManager
+                cookie_str = self._netscape_to_cookie_str(str(cf))
+                kw = {
+                    "cookie": cookie_str, "languages": "en_US",
+                    "timeout": 15, "max_retries": 2,
+                    "max_connections": 2, "max_tasks": 2,
+                    "page_counts": 1, "max_counts": None,
+                    "headers": ClientConfManager.headers(),
+                }
+                async def _get_dy_url():
+                    profile = await DouyinHandler(kw).fetch_user_profile(account_id)
+                    for attr in ("avatar_thumb", "avatar_medium", "avatar_larger",
+                                 "avatar_url", "avatar"):
+                        obj = getattr(profile, attr, None)
+                        if obj is None:
+                            continue
+                        if isinstance(obj, str) and obj.startswith("http"):
+                            return obj
+                        ul = getattr(obj, "url_list", None)
+                        if ul:
+                            return ul[0]
+                    return None
+                url = _aio.run(_get_dy_url())
+
+            if url:
+                _ulr.urlretrieve(url, str(cache))
+                return cache
+        except Exception:
+            pass
+        return None
+
+    # ── Post index (ghost-post detection) ──────────────────────────────────────
+    def _load_post_index(self) -> dict:
+        import json as _j
+        try:
+            p = Path(POST_INDEX_FILE)
+            if p.exists():
+                return _j.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _save_post_index(self, index: dict):
+        import json as _j
+        try:
+            Path(POST_INDEX_FILE).write_text(
+                _j.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _index_new_files_batch(self, results: list):
+        """Record newly downloaded files in the post index after a sync."""
+        if not results:
+            return
+        import datetime as _dt
+        today   = _dt.date.today().isoformat()
+        index   = self._load_post_index()
+        changed = False
+        for r in results:
+            plat   = r.get("platform")
+            handle = r.get("handle", "")
+            files  = r.get("files", [])
+            if not plat or not handle or not files:
+                continue
+            account_id = handle.split("|")[-1]
+            acc_idx    = index.setdefault(plat, {}).setdefault(account_id, {})
+            for fname in files:
+                post_id, date = _extract_post_id_and_date(plat, fname)
+                if post_id and post_id not in acc_idx:
+                    acc_idx[post_id] = {
+                        "date": date or "", "file": fname,
+                        "status": "ok", "checked": today,
+                    }
+                    changed = True
+        if changed:
+            self._save_post_index(index)
+
+    def _retroactive_index_scan(self):
+        """Background: walk existing download folders and seed the post index."""
+        import re as _re
+        try:
+            index   = self._load_post_index()
+            dl_root = self._get_download_dir().resolve()
+            changed = False
+            for entry in self._store.all_entries():
+                plat       = entry.platform
+                account_id = entry.handle.split("|")[-1]
+                creator    = self._store.get_creator(entry.creator_id) if entry.creator_id else None
+                cname      = creator.name if creator else "Unassigned"
+                safe_cname = _re.sub(r'[\\/:*?"<>|]', "_", cname).strip()
+                folder     = dl_root / safe_cname
+                if not folder.exists():
+                    continue
+                acc_idx = index.setdefault(plat, {}).setdefault(account_id, {})
+                for f in folder.iterdir():
+                    if not f.is_file():
+                        continue
+                    post_id, date = _extract_post_id_and_date(plat, f.name)
+                    if post_id and post_id not in acc_idx:
+                        acc_idx[post_id] = {
+                            "date": date or "", "file": f.name,
+                            "status": "unchecked", "checked": "",
+                        }
+                        changed = True
+            if changed:
+                self._save_post_index(index)
+        except Exception:
+            pass
+
+    def _run_ghost_check(self, entry, on_post_done, on_progress, on_complete, stop_event):
+        """Background: verify each indexed post individually.
+
+        on_post_done(post_id, status, meta) — fires on main thread after each check.
+        on_progress(done, total)            — fires on main thread for progress updates.
+        on_complete()                       — fires on main thread when finished.
+
+        status is 'ok', 'gone', or 'error' (error = couldn't reach, don't update cached status).
+        Posts already marked 'gone' and posts verified ok within 7 days are skipped.
+        """
+        import datetime as _dt, subprocess as _sp
+        STALE_DAYS = 7
+        today      = _dt.date.today().isoformat()
+        plat       = entry.platform
+        cfg        = PLATFORMS[plat]
+        account_id = entry.handle.split("|")[-1]
+        cookies    = cfg["cookies_file"]
+
+        index = self._load_post_index()
+        all_posts = {k: v for k, v in index.get(plat, {}).get(account_id, {}).items()
+                     if not k.startswith("_")}
+
+        def _needs_check(meta):
+            s = meta.get("status", "unchecked")
+            if s == "gone":
+                return False
+            if s == "ok":
+                try:
+                    age = (_dt.date.today() - _dt.date.fromisoformat(meta["checked"])).days
+                    return age >= STALE_DAYS
+                except Exception:
+                    pass
+            return True
+
+        to_check = [(pid, meta) for pid, meta in all_posts.items() if _needs_check(meta)]
+        total    = len(to_check)
+        done_n   = [0]
+
+        def _save_and_notify(post_id, status, meta):
+            if status != "error":
+                idx = self._load_post_index()
+                acc = idx.setdefault(plat, {}).setdefault(account_id, {})
+                if post_id in acc:
+                    acc[post_id]["status"]  = status
+                    acc[post_id]["checked"] = today
+                self._save_post_index(idx)
+            done_n[0] += 1
+            self.after(0, on_post_done, post_id, status, meta)
+            self.after(0, on_progress, done_n[0], total)
+
+        if not to_check:
+            self.after(0, on_complete)
+            return
+
+        if plat == "douyin":
+            import asyncio as _aio
+            from f2.apps.douyin.handler import DouyinHandler
+            from f2.apps.douyin.utils import ClientConfManager
+            cookie_str = self._netscape_to_cookie_str(cookies)
+            kw = {
+                "cookie": cookie_str, "languages": "en_US",
+                "timeout": 30, "max_retries": 2,
+                "max_connections": 5, "max_tasks": 5,
+                "page_counts": 20, "max_counts": None,
+                "headers": ClientConfManager.headers(),
+            }
+            handler = DouyinHandler(kw)
+
+            async def _check_all_dy():
+                sem = _aio.Semaphore(5)
+                async def _one(post_id, meta):
+                    if stop_event.is_set():
+                        return
+                    async with sem:
+                        try:
+                            data   = (await handler.fetch_one_video(post_id))._to_dict()
+                            status = ("ok"
+                                      if isinstance(data, dict) and
+                                         str(data.get("aweme_id", "")) == str(post_id)
+                                      else "gone")
+                        except Exception:
+                            status = "error"
+                    _save_and_notify(post_id, status, meta)
+                await _aio.gather(*[_one(pid, m) for pid, m in to_check])
+
+            _aio.run(_check_all_dy())
+
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+
+            def _check_one(post_id, meta):
+                if stop_event.is_set():
+                    return post_id, "error", meta
+                try:
+                    if plat == "bilibili":
+                        url = f"https://www.bilibili.com/video/{post_id}"
+                        r   = _sp.run(
+                            ["yt-dlp", "--simulate", "--no-warnings",
+                             "--cookies", cookies, url],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=30,
+                            creationflags=_sp.CREATE_NO_WINDOW,
+                        )
+                        if r.returncode == 0:
+                            return post_id, "ok", meta
+                        out = r.stdout + r.stderr
+                        if any(k in out.lower() for k in
+                               ("deleted", "unavailable", "private", "404", "not exist")):
+                            return post_id, "gone", meta
+                        return post_id, "error", meta
+
+                    elif plat == "x":
+                        url = f"https://x.com/{account_id}/status/{post_id}"
+                        r   = _sp.run(
+                            [GDL, "--simulate", "--cookies", cookies, url],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=30,
+                            creationflags=_sp.CREATE_NO_WINDOW,
+                        )
+                        out = r.stdout + r.stderr
+                        if "[error]" in out.lower() and any(
+                                k in out for k in (
+                                    "not found", "deleted", "suspended",
+                                    "unavailable", "TweetUnavailable")):
+                            return post_id, "gone", meta
+                        if r.returncode == 0:
+                            return post_id, "ok", meta
+                        return post_id, "error", meta
+                except Exception:
+                    return post_id, "error", meta
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futs = {pool.submit(_check_one, pid, m): pid for pid, m in to_check}
+                for fut in _ac(futs):
+                    post_id, status, meta = fut.result()
+                    _save_and_notify(post_id, status, meta)
+
+        self.after(0, on_complete)
+
+    def _show_posts_panel(self, entry):
+        """Posts dialog: full post list with gone markers + inline ghost-check."""
+        import datetime as _dt
+        STALE_DAYS = 7
+        c          = THEME_COLORS[self._current_theme]
+        plat       = entry.platform
+        plat_label = PLATFORMS.get(plat, {}).get("label", plat)
+        display    = entry.handle.split("|")[0]
+        account_id = entry.handle.split("|")[-1]
+
+        index     = self._load_post_index()
+        all_posts = {k: v for k, v in index.get(plat, {}).get(account_id, {}).items()
+                     if not k.startswith("_")}
+        gone_items  = sorted([(p, m) for p, m in all_posts.items() if m.get("status") == "gone"],
+                             key=lambda x: x[1].get("date", ""), reverse=True)
+        other_items = sorted([(p, m) for p, m in all_posts.items() if m.get("status") != "gone"],
+                             key=lambda x: x[1].get("date", ""), reverse=True)
+        all_ordered = gone_items + other_items
+
+        _cnt = {
+            "gone":      len(gone_items),
+            "ok":        sum(1 for m in all_posts.values() if m.get("status") == "ok"),
+            "unchecked": sum(1 for m in all_posts.values()
+                             if m.get("status") not in ("ok", "gone")),
+        }
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"{display} — Posts")
+        dlg.configure(bg=c["panel"])
+        dlg.resizable(True, True)
+        self._centre_dialog(dlg, int(600 * self._sf), int(540 * self._sf))
+        dlg.transient(self)
+        dlg.grab_set()
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = tk.Frame(dlg, bg=c["panel"])
+        hdr.pack(fill=tk.X, padx=16, pady=(14, 0))
+        tk.Label(hdr, text=display, font=FONTS["heading"],
+                 bg=c["panel"], fg=c["text"]).pack(anchor="w")
+        summary_var = tk.StringVar()
+        summary_lbl = tk.Label(hdr, textvariable=summary_var, font=FONTS["small"],
+                               bg=c["panel"], fg=c["text_dim"])
+        summary_lbl.pack(anchor="w")
+        tk.Frame(dlg, bg=c["border"], height=1).pack(fill=tk.X, padx=16, pady=(10, 0))
+
+        # ── Progress row (lives in a fixed container; shown/hidden inside it) ──
+        prog_container = tk.Frame(dlg, bg=c["panel"])
+        prog_container.pack(fill=tk.X)
+        prog_row = tk.Frame(prog_container, bg=c["panel"])
+        prog_lbl_var = tk.StringVar()
+        tk.Label(prog_row, textvariable=prog_lbl_var, font=FONTS["small"],
+                 bg=c["panel"], fg=c["text_dim"]).pack(side=tk.LEFT, padx=(16, 8))
+        prog_bar = ttk.Progressbar(prog_row, mode="determinate", length=240)
+        prog_bar.pack(side=tk.LEFT, pady=4)
+
+        # ── Scrollable post list ───────────────────────────────────────────────
+        list_outer = tk.Frame(dlg, bg=c["panel"])
+        list_outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=4)
+        lcanvas = tk.Canvas(list_outer, bg=c["list_bg"], highlightthickness=0)
+        sb      = ttk.Scrollbar(list_outer, orient="vertical", command=lcanvas.yview)
+        lcanvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        lcanvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(lcanvas, bg=c["list_bg"])
+        win   = lcanvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: lcanvas.configure(scrollregion=lcanvas.bbox("all")))
+        lcanvas.bind("<Configure>", lambda e: lcanvas.itemconfig(win, width=e.width))
+        lcanvas.bind("<MouseWheel>",
+                     lambda e: lcanvas.yview_scroll(-1 * (e.delta // 120), "units"))
+
+        _row_refs = {}   # post_id → (badge_lbl, fname_lbl)
+
+        if not all_ordered:
+            tk.Label(inner, text="No posts indexed yet — run a sync first.",
+                     font=FONTS["body"], bg=c["list_bg"], fg=c["text_dim"]).pack(pady=20)
+        else:
+            col_hdr = tk.Frame(inner, bg=c["list_bg"])
+            col_hdr.pack(fill=tk.X, padx=8, pady=(4, 2))
+            tk.Label(col_hdr, text="Date",   font=FONTS["small"], bg=c["list_bg"],
+                     fg=c["text_dim"], width=11, anchor="w").pack(side=tk.LEFT)
+            tk.Label(col_hdr, text="Status", font=FONTS["small"], bg=c["list_bg"],
+                     fg=c["text_dim"], width=6,  anchor="w").pack(side=tk.LEFT, padx=(0, 8))
+            tk.Label(col_hdr, text="File",   font=FONTS["small"], bg=c["list_bg"],
+                     fg=c["text_dim"], anchor="w").pack(side=tk.LEFT)
+            tk.Frame(inner, bg=c["border"], height=1).pack(fill=tk.X, padx=8, pady=(0, 2))
+
+            for pid, meta in all_ordered:
+                is_gone = meta.get("status") == "gone"
+                row = tk.Frame(inner, bg=c["list_bg"])
+                row.pack(fill=tk.X, padx=8, pady=1)
+
+                tk.Label(row, text=(meta.get("date") or "")[:10] or "—",
+                         font=FONTS["small"], bg=c["list_bg"], fg=c["text_dim"],
+                         width=11, anchor="w").pack(side=tk.LEFT)
+
+                if is_gone:
+                    badge = tk.Label(row, text="Gone", font=FONTS["small"],
+                                     bg="#c0392b", fg="#ffffff", padx=4, pady=0)
+                    badge.pack(side=tk.LEFT, padx=(0, 8))
+                else:
+                    badge = tk.Label(row, text="✓", font=FONTS["small"],
+                                     bg=c["list_bg"], fg=c["text_dim"], width=6, anchor="w")
+                    badge.pack(side=tk.LEFT, padx=(0, 8))
+
+                fname_lbl = tk.Label(row, text=meta.get("file") or pid,
+                                     font=FONTS["small"], bg=c["list_bg"],
+                                     fg="#e05252" if is_gone else c["text"], anchor="w")
+                fname_lbl.pack(side=tk.LEFT, fill=tk.X)
+                _row_refs[pid] = (badge, fname_lbl)
+
+        # ── Bottom buttons ─────────────────────────────────────────────────────
+        tk.Frame(dlg, bg=c["border"], height=1).pack(fill=tk.X, padx=16)
+        btn_row = tk.Frame(dlg, bg=c["panel"])
+        btn_row.pack(fill=tk.X, padx=16, pady=10)
+        check_btn = ttk.Button(btn_row, text="▶  Check")
+        check_btn.pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+
+        # ── State + logic ──────────────────────────────────────────────────────
+        _stop_evt = threading.Event()
+        _checking = [False]
+
+        def _is_stale(meta):
+            try:
+                return (_dt.date.today() -
+                        _dt.date.fromisoformat(meta["checked"])).days >= STALE_DAYS
+            except Exception:
+                return True
+
+        def _update_summary():
+            total = _cnt["gone"] + _cnt["ok"] + _cnt["unchecked"]
+            parts = [f"{total} posts"]
+            if _cnt["gone"]:
+                parts.append(f"⚠ {_cnt['gone']} gone")
+            summary_var.set("  ·  ".join(parts))
+            summary_lbl.configure(fg="#e05252" if _cnt["gone"] else c["text_dim"])
+
+        def _on_post_done(post_id, status, meta):
+            if status == "gone":
+                _cnt["gone"] += 1
+                _cnt["unchecked"] = max(0, _cnt["unchecked"] - 1)
+                if post_id in _row_refs:
+                    badge, fname_lbl = _row_refs[post_id]
+                    badge.configure(text="Gone", bg="#c0392b", fg="#ffffff",
+                                    width=0, padx=4)
+                    fname_lbl.configure(fg="#e05252")
+            elif status == "ok":
+                _cnt["ok"] += 1
+                _cnt["unchecked"] = max(0, _cnt["unchecked"] - 1)
+            _update_summary()
+
+        def _on_progress(done, total):
+            prog_lbl_var.set(f"{done} / {total}")
+            prog_bar["maximum"] = total
+            prog_bar["value"]   = done
+
+        def _on_complete():
+            _checking[0] = False
+            prog_row.pack_forget()
+            check_btn.configure(text="▶  Re-check All", state="normal")
+            _update_summary()
+
+        def _start_check():
+            if _checking[0]:
+                _stop_evt.set()
+                check_btn.configure(text="Stopping…", state="disabled")
+                return
+            _stop_evt.clear()
+            _checking[0] = True
+            prog_bar["value"] = 0
+            prog_lbl_var.set("Starting…")
+            prog_row.pack(fill=tk.X)
+            check_btn.configure(text="■  Stop")
+            threading.Thread(
+                target=self._run_ghost_check,
+                args=(entry, _on_post_done, _on_progress, _on_complete, _stop_evt),
+                daemon=True,
+            ).start()
+
+        n_pending = _cnt["unchecked"] + sum(
+            1 for m in all_posts.values() if m.get("status") == "ok" and _is_stale(m))
+        if n_pending > 0:
+            check_btn.configure(text=f"▶  Check ({n_pending} pending)")
+        elif all_posts:
+            check_btn.configure(text="▶  Re-check All")
+        check_btn.configure(command=_start_check)
+        _update_summary()
 
     # ── Persistent settings ────────────────────────────────────────────────────
     def _load_settings(self) -> dict:
@@ -1990,37 +2533,21 @@ class App(tk.Tk):
     def _render_creator_section(self, creator, entries, parent):
         c = THEME_COLORS[self._current_theme]
 
-        # Single-entry creators: bordered card, no group header
-        if len(entries) == 1:
-            group = tk.Frame(parent, bg=c["border"])
-            group.pack(fill=tk.X, padx=8, pady=(16, 8))
-            gf = tk.Frame(group, bg=c["list_bg"])
-            gf.pack(fill=tk.X, padx=2, pady=2)
-            self._render_entry_row(entries[0], creator.id, gf)
-            return
-
-        # Bordered group container
-        group = tk.Frame(parent, bg=c["border"],
-                         highlightthickness=0)
+        group = tk.Frame(parent, bg=c["border"])
         group.pack(fill=tk.X, padx=8, pady=(16, 8))
         inner = tk.Frame(group, bg=c["panel"])
         inner.pack(fill=tk.X, padx=2, pady=2)
 
+        # Header: accent bar | creator name | ⋯
         hdr = tk.Frame(inner, bg=c["panel"])
         hdr.pack(fill=tk.X)
-
-        # Thick accent bar
         tk.Frame(hdr, bg=c["accent"], width=4).pack(side=tk.LEFT, fill=tk.Y)
-
         name_lbl = tk.Label(hdr, text=creator.name,
-                            bg=c["panel"], fg=c["text"],
-                            font=FONTS["heading"], anchor="w")
+                             bg=c["panel"], fg=c["text"],
+                             font=FONTS["heading"], anchor="w")
         name_lbl.pack(side=tk.LEFT, padx=(10, 4), pady=6, fill=tk.X, expand=True)
-
-        # ⋯ — invisible until hover
         more = tk.Label(hdr, text="⋯", cursor="hand2",
-                        bg=c["panel"], fg=c["panel"],
-                        font=FONTS["body"])
+                        bg=c["panel"], fg=c["panel"], font=FONTS["body"])
         more.pack(side=tk.RIGHT, padx=(0, 10))
 
         def _rename():
@@ -2062,18 +2589,16 @@ class App(tk.Tk):
         self._drag_headers.append((hdr, creator.id))
         self._drag_hdr_colors[id(hdr)] = c["panel"]
 
+        # Circle row
+        gf = tk.Frame(inner, bg=c["list_bg"])
+        gf.pack(fill=tk.X, pady=(0, 4))
         if entries:
-            gf = tk.Frame(inner, bg=c["list_bg"])
-            gf.pack(fill=tk.X, padx=0, pady=(0, 0))
             for entry in entries:
-                self._render_entry_row(entry, creator.id, gf)
+                self._render_entry_circle(entry, creator.id, gf)
         else:
-            # Empty group — dim placeholder, still a valid drag target
-            tk.Label(inner,
-                     text="No entries — drag one here",
+            tk.Label(gf, text="No entries — drag one here",
                      bg=c["list_bg"], fg=c["text_dim"],
-                     font=FONTS["small"], anchor="w"
-                     ).pack(fill=tk.X, padx=(24, 0), pady=4)
+                     font=FONTS["small"], anchor="w").pack(padx=16, pady=8)
 
     def _render_unassigned_section(self, entries, parent):
         c = THEME_COLORS[self._current_theme]
@@ -2092,7 +2617,7 @@ class App(tk.Tk):
         gf = tk.Frame(parent, bg=c["list_bg"])
         gf.pack(fill=tk.X, padx=8, pady=(2, 4))
         for entry in entries:
-            self._render_entry_row(entry, None, gf)
+            self._render_entry_circle(entry, None, gf)
 
     def _render_entry_row(self, entry, current_creator_id, parent):
         c   = THEME_COLORS[self._current_theme]
@@ -2154,6 +2679,9 @@ class App(tk.Tk):
             self._store.assign_entry(entry.id, new_c.id)
             self._refresh_creator_list()
 
+        def _check_deleted():
+            self._show_posts_panel(entry)
+
         def _show_ctx(x, y):
             m = tk.Menu(self, tearoff=0)
             creators = self._store.all_creators()
@@ -2176,6 +2704,8 @@ class App(tk.Tk):
                 m.add_separator()
             m.add_command(label=f'Create creator "{display}"',
                           command=_create_creator_for_entry)
+            m.add_separator()
+            m.add_command(label="Check deleted posts", command=_check_deleted)
             m.add_separator()
             m.add_command(label="Remove", command=_remove)
             try:
@@ -2210,6 +2740,139 @@ class App(tk.Tk):
                    lambda e, eid=entry.id, d=display: self._drag_motion(e, eid, d))
             w.bind("<ButtonRelease-1>",
                    lambda e, eid=entry.id: self._drag_release(e, eid))
+
+    def _render_entry_circle(self, entry, current_creator_id, parent):
+        """Render one account as a circular avatar tile."""
+        c          = THEME_COLORS[self._current_theme]
+        cfg        = PLATFORMS.get(entry.platform, {})
+        display    = entry.handle.split("|")[0] if "|" in entry.handle else entry.handle
+        account_id = entry.handle.split("|")[-1]
+        plat_color = cfg.get("color", c["accent"])
+        ring_color = cfg.get("icon_bg", plat_color)
+
+        D   = int(80 * self._sf)   # circle diameter
+        PAD = max(3, int(4 * self._sf))  # space around circle for the hover ring
+        CS  = D + PAD * 2              # total canvas size
+        CX  = CS // 2                  # canvas centre
+
+        card = tk.Frame(parent, bg=c["list_bg"])
+        card.pack(side=tk.LEFT, padx=(8, 4), pady=10)
+
+        # ── Circle canvas (PAD px margin on every side for the hover ring) ───
+        cv = tk.Canvas(card, width=CS, height=CS, bg=c["list_bg"],
+                       highlightthickness=0, cursor="hand2")
+        cv.pack()
+        # Filled circle (platform color) — sits inside the padding
+        cv.create_oval(PAD, PAD, PAD + D - 1, PAD + D - 1,
+                       fill=plat_color, outline="", tags="bg_fill")
+        cv.create_text(CX, CX, text=cfg.get("icon", entry.platform[0].upper()),
+                       fill="#ffffff", font=FONTS["heading"], tags="placeholder_icon")
+
+        # ── Name + platform labels ─────────────────────────────────────────────
+        short = (display[:13] + "…") if len(display) > 13 else display
+        name_lbl = tk.Label(card, text=short, bg=c["list_bg"], fg=c["text"],
+                             font=FONTS["small"], wraplength=D + 16, anchor="center")
+        name_lbl.pack(pady=(4, 0))
+        plat_lbl = tk.Label(card, text=cfg.get("label", entry.platform),
+                             bg=c["list_bg"], fg=c["text_dim"],
+                             font=(FONTS["small"][0], max(9, FONTS["small"][1] - 1)),
+                             anchor="center")
+        plat_lbl.pack()
+
+        # ── Hover ─────────────────────────────────────────────────────────────
+        _hover_on = [False]
+
+        def _enter(_e=None):
+            if _hover_on[0]:
+                return
+            _hover_on[0] = True
+            cv.create_oval(1, 1, CS - 2, CS - 2,
+                           outline=ring_color, width=2, fill="", tags="hover_ring")
+            for w in (card, name_lbl, plat_lbl):
+                w.configure(bg=c["hover"])
+            cv.configure(bg=c["hover"])
+
+        def _leave(_e=None):
+            _hover_on[0] = False
+            cv.delete("hover_ring")
+            for w in (card, name_lbl, plat_lbl):
+                w.configure(bg=c["list_bg"])
+            cv.configure(bg=c["list_bg"])
+
+        # ── Context menu ──────────────────────────────────────────────────────
+        def _remove():
+            if messagebox.askyesno("Remove",
+                                   f'Remove "{display}" from tracking?', parent=self):
+                self._store.remove_entry(entry.id)
+                self._refresh_creator_list()
+
+        def _create_creator_for_entry():
+            new_c = self._store.add_creator(display)
+            self._store.assign_entry(entry.id, new_c.id)
+            self._refresh_creator_list()
+
+        def _show_ctx(x, y):
+            m = tk.Menu(self, tearoff=0)
+            creators = self._store.all_creators()
+            if creators:
+                sub = tk.Menu(m, tearoff=0)
+                for cr in creators:
+                    sub.add_command(
+                        label=cr.name,
+                        command=lambda cid=cr.id: (
+                            self._store.assign_entry(entry.id, cid),
+                            self._refresh_creator_list()))
+                if current_creator_id is not None:
+                    sub.add_separator()
+                    sub.add_command(
+                        label=self._t("creator.unassigned"),
+                        command=lambda: (
+                            self._store.assign_entry(entry.id, None),
+                            self._refresh_creator_list()))
+                m.add_cascade(label="Move to", menu=sub)
+                m.add_separator()
+            m.add_command(label=f'Create creator "{display}"',
+                          command=_create_creator_for_entry)
+            m.add_separator()
+            m.add_command(label="Posts",
+                          command=lambda: self._show_posts_panel(entry))
+            m.add_separator()
+            m.add_command(label="Remove", command=_remove)
+            try:
+                m.tk_popup(x, y)
+            finally:
+                m.grab_release()
+
+        for w in (card, cv, name_lbl, plat_lbl):
+            w.bind("<Enter>",    _enter)
+            w.bind("<Leave>",    _leave)
+            w.bind("<Button-3>", lambda e: _show_ctx(e.x_root, e.y_root))
+
+        # ── Click circle to open posts ─────────────────────────────────────────
+        cv.bind("<ButtonRelease-1>", lambda e: self._show_posts_panel(entry))
+
+        # ── Avatar (fetched in background, swapped in when ready) ─────────────
+        def _load_avatar():
+            path = self._fetch_avatar(entry.platform, account_id)
+            if not path:
+                return
+            photo = self._make_circle_photo(path, D, c["list_bg"])
+            if photo:
+                self.after(0, _apply_avatar, photo)
+
+        def _apply_avatar(photo):
+            try:
+                if not cv.winfo_exists():
+                    return
+            except Exception:
+                return
+            cv._photo = photo   # keep reference to prevent GC
+            cv.delete("bg_fill", "placeholder_icon")
+            cv.create_oval(PAD, PAD, PAD + D - 1, PAD + D - 1,
+                           fill=plat_color, outline=plat_color, tags="color_ring")
+            cv.create_image(CX, CX, image=photo, anchor="center", tags="avatar")
+
+        threading.Thread(target=_load_avatar, daemon=True).start()
 
     def _refresh_creator_list_theme(self):
         if self._creators_canvas is None:
@@ -3892,6 +4555,7 @@ class App(tk.Tk):
 
                         return {
                             "platform": pid,
+                            "handle":   user,
                             "display":  display,
                             "count":    new_count,
                             "corrupt":  corrupt_count,
@@ -4020,6 +4684,7 @@ class App(tk.Tk):
 
                         return {
                             "platform": pid,
+                            "handle":   user,
                             "display":  display,
                             "count":    new_count,
                             "corrupt":  corrupt_count,
@@ -4131,6 +4796,7 @@ class App(tk.Tk):
                         else:
                             _local_results.append({
                                 "platform": pid,
+                                "handle":   user,
                                 "display":  display,
                                 "count":    new_count,
                                 "corrupt":  corrupt_count,
@@ -4165,12 +4831,14 @@ class App(tk.Tk):
                             _all_update_results.extend(_presults)
                             if _psusp:
                                 _all_suspended.setdefault(_ppid, []).extend(_psusp)
+                        self._index_new_files_batch(_presults)
             else:
                 _pid, _users = next(iter(by_pid.items()))
                 _presults, _psusp = _run_platform(_pid, _users)
                 _all_update_results.extend(_presults)
                 if _psusp:
                     _all_suspended.setdefault(_pid, []).extend(_psusp)
+                self._index_new_files_batch(_presults)
 
             for susp_pid, susp_handles in _all_suspended.items():
                 self._remove_suspended(susp_handles, susp_pid)
