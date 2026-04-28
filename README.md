@@ -1,8 +1,8 @@
 # Archiver
 
-> A Windows desktop application for batch-downloading media from **X (Twitter)**, **Douyin (抖音)**, and **Bilibili**.
+> A Windows desktop application for batch-downloading media from **X (Twitter)**, **Douyin**, and **Bilibili**.
 
-[![Version](https://img.shields.io/badge/version-4.0.4-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-4.0.5-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -16,18 +16,12 @@ Archiver lets you maintain a local archive of content from multiple social media
 
 ## Features
 
-| Category | Details |
-|----------|---------|
-| **Download modes** | **Update** — new posts only; **Full** — complete history with optional date range; **Auto** — scheduled background sync (default every 30 min) |
-| **Platforms** | X (Twitter) via gallery-dl · Douyin via f2 · Bilibili via yt-dlp |
-| **Account management** | Group accounts under named creators; supports multiple platforms per creator |
-| **Single URL download** | Paste any supported URL to download a single post immediately |
-| **Integrity checking** | Detects corrupt and truncated downloads (MP4 box-structure validation); re-downloads failed files automatically |
-| **Concurrency** | Parallel downloads across platforms with configurable worker count |
-| **Rate limiting** | Progressive inter-user sleep (5 s → 30 s) to avoid IP-level throttling |
-| **Authentication** | Per-platform Netscape cookies.txt import |
-| **Telegram bot** | Send a post or profile URL from your phone; downloads start on the PC instantly |
-| **UI** | Dark / light theme · English / Chinese · DPI-aware · System tray support |
+- Download from **X (Twitter)**, **Douyin**, and **Bilibili**
+- **Update** mode (new posts only), **Full** mode (complete history), and **Auto** scheduled sync
+- Group accounts under named creators across platforms
+- Paste any post URL for an instant one-off download
+- Telegram bot — send a link from your phone and it downloads on the PC
+- Dark / light theme · English / Chinese
 
 ---
 
@@ -54,11 +48,9 @@ Accounts are grouped under **Creators** in the Accounts panel.
 
 | Platform | Accepted Input |
 |----------|----------------|
-| X (Twitter) | Username — e.g. `username` |
+| X (Twitter) | Profile URL (e.g. `https://x.com/username`) or bare username |
 | Douyin | Profile page URL or bare `sec_uid` |
 | Bilibili | Space page URL or bare UID |
-
-For Douyin and Bilibili, paste the profile URL directly — the app extracts the identifier automatically.
 
 ### 3. Download
 
@@ -199,7 +191,10 @@ packaging/
 
 ---
 
-## Changelog
+## Release Notes
+
+### v4.0.5
+- Fixed: pasting an X (Twitter) profile URL when adding an account now correctly extracts the username instead of storing the full URL as the display name (affected both the quick-add bar and the Add Account dialog)
 
 ### v4.0.4
 - Installer now lets users choose install path (defaults to Program Files)

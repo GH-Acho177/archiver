@@ -1673,7 +1673,8 @@ class App(tk.Tk):
                 self._refresh_creator_list()
 
             if pid == "x":
-                handle = raw.lstrip("@")
+                _m = _re.match(r'https?://(?:x|twitter)\.com/([A-Za-z0-9_]+)', raw)
+                handle = _m.group(1) if _m else raw.lstrip("@")
                 if not handle:
                     return
                 self._bar_entry.configure(state="disabled")
@@ -2560,7 +2561,8 @@ class App(tk.Tk):
             cfg = PLATFORMS[pid]
 
             if pid == "x":
-                _finish(raw.lstrip("@"))
+                _mx = _re.match(r'https?://(?:x|twitter)\.com/([A-Za-z0-9_]+)', raw)
+                _finish(_mx.group(1) if _mx else raw.lstrip("@"))
 
             elif pid == "bilibili":
                 m   = _re.search(r"space\.bilibili\.com/(\d+)", raw)

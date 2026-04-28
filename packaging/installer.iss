@@ -3,7 +3,7 @@
 ; Compile:  Right-click this file → Compile  (or open in Inno Setup IDE)
 
 #define AppName      "Archiver"
-#define AppVersion   "4.0.4"
+#define AppVersion   "4.0.5"
 #define AppPublisher "GH-Acho177"
 #define AppExeName   "Archiver.exe"
 [Setup]

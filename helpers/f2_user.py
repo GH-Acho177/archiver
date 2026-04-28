@@ -71,6 +71,11 @@ async def download_user(
             break
         items = [item for item in aweme_data_list._to_list()
                  if str(item.get("aweme_id", "")) not in existing_ids]
+        for item in items:
+            if not item.get("nickname"):
+                item["nickname"] = "unknown"
+            if not item.get("create"):
+                item["create"] = item.get("aweme_id", "unknown")
         if items:
             await handler.downloader.create_download_tasks(
                 kwargs, items, user_path

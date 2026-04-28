@@ -48,8 +48,14 @@ async def download_one(
     aweme_data = await handler.fetch_one_video(aweme_id)
     user_path = Path(outdir)
     user_path.mkdir(parents=True, exist_ok=True)
+    data = aweme_data._to_dict()
+    if isinstance(data, dict):
+        if not data.get("nickname"):
+            data["nickname"] = "unknown"
+        if not data.get("create"):
+            data["create"] = aweme_id
     await handler.downloader.create_download_tasks(
-        kwargs, aweme_data._to_dict(), user_path
+        kwargs, data, user_path
     )
 
 
