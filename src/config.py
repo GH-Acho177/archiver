@@ -1,4 +1,4 @@
-APP_VERSION = "4.0.6"
+APP_VERSION = "5.0.0"
 POST_INDEX_FILE = "config/post_index.json"
 
 # ── Platform config ────────────────────────────────────────────────────────────
@@ -38,12 +38,12 @@ PLATFORMS = {
 }
 
 GDL                 = "gallery-dl"
-CREATORS_FILE       = "config/creators.json"
 SETTINGS_FILE       = "config/settings.json"
 DOUYIN_LAST_RUN     = "config/douyin_last_run.json"
 UPDATE_HISTORY_FILE = "config/update_history.json"
 DOWNLOAD_PATH_FILE  = "config/download_path.txt"
 LANG_FILE           = "config/lang.txt"
+ARCHIVES_DIR        = "config/archives"
 ACCENT              = "#0067c0"
 
 STRINGS = {

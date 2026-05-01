@@ -3,32 +3,22 @@
 # PyInstaller spec for Archiver
 # Run:  pyinstaller packaging/Archiver.spec   (from project root)
 #
-import importlib.util as _ilu
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
-_root = Path(SPECPATH).parent   # project root  (spec lives in packaging/, so parent = root)
-
-# ── Locate sv_ttk and copy its entire package folder into the bundle ───────────
-_sv = _ilu.find_spec('sv_ttk')
-if not _sv or not _sv.submodule_search_locations:
-    raise SystemExit(
-        "\n[BUILD ERROR] sv_ttk not found.\n"
-        "Activate the virtual environment that has sv_ttk installed, then re-run.\n"
-    )
-_sv_dir = list(_sv.submodule_search_locations)[0]
+_root = Path(SPECPATH).parent   # project root (spec lives in packaging/)
 
 # ── Package data files ─────────────────────────────────────────────────────────
 datas    = []
 binaries = []
 hiddenimports = []
 
-datas += [(_sv_dir, 'sv_ttk')]            # sv_ttk package (Python + theme assets)
-datas += collect_data_files('f2')         # f2 language / config files
-datas += [(str(_root / 'helpers'), 'helpers')]   # f2_one.py, f2_user.py
-if (_root / 'fonts').exists():
-    datas += [(str(_root / 'fonts'), 'fonts')]   # bundled fonts (e.g. JetBrains Mono)
+datas += collect_data_files('f2')                               # f2 language / config files
+datas += [(str(_root / 'helpers'), 'helpers')]                  # f2_one.py, f2_user.py, tg_bot.py
+datas += [(str(_root / 'src'), 'src')]                          # api.py, config.py, creator_store.py
+if (_root / 'ui' / 'dist').exists():
+    datas += [(str(_root / 'ui' / 'dist'), 'ui/dist')]          # React build
 
 # Assets (icon + platform icons)
 _assets = _root / 'assets'
@@ -47,13 +37,25 @@ for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
 # ── Hidden imports PyInstaller may miss ────────────────────────────────────────
 hiddenimports += [
     'src.config',
-    'src.utils',
     'src.creator_store',
-    'sv_ttk',
-    'tkinter',
-    'tkinter.ttk',
-    'tkinter.messagebox',
-    'tkinter.filedialog',
+    'src.api',
+    'fastapi',
+    'uvicorn',
+    'uvicorn.logging',
+    'uvicorn.loops',
+    'uvicorn.loops.auto',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'webview',
+    'pystray',
+    'pystray._win32',
+    'PIL',
+    'PIL.Image',
     'asyncio',
     'f2',
     'f2.apps.douyin.handler',
@@ -61,15 +63,11 @@ hiddenimports += [
     'f2.utils.utils',
     'aiohttp',
     'aiofiles',
-    'pystray',
-    'pystray._win32',
-    'PIL',
-    'PIL.Image',
 ]
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
 a = Analysis(
-    [str(_root / 'app.py')],
+    [str(_root / 'run_api.py')],
     pathex=[str(_root)],
     binaries=binaries,
     datas=datas,
@@ -77,7 +75,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'pandas', 'pytest'],
+    excludes=['matplotlib', 'numpy', 'pandas', 'pytest', 'tkinter', 'sv_ttk'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

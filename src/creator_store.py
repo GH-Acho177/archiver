@@ -95,24 +95,24 @@ class CreatorStore:
     def get_entries_for_platform(self, platform: str) -> list[Entry]:
         return [e for e in self._entries if e.platform == platform]
 
-    def get_handles_for_download(self, platform: str,
-                                 creator_ids: "list[str] | None" = None) -> list[str]:
-        """Handles for the download worker.
+    def get_entries_for_download(self, platform: str,
+                                 creator_ids: "list[str] | None" = None) -> "list[Entry]":
+        """Entries for the download worker.
 
         creator_ids=None → all entries for the platform.
         Otherwise only entries whose creator_id is in the list (UNASSIGNED_ID
         matches entries with creator_id=None).
         """
         if creator_ids is None:
-            return [e.handle for e in self._entries if e.platform == platform]
-        selected: list[str] = []
+            return [e for e in self._entries if e.platform == platform]
+        selected: list[Entry] = []
         for e in self._entries:
             if e.platform != platform:
                 continue
             match = (e.creator_id in creator_ids or
                      (e.creator_id is None and UNASSIGNED_ID in creator_ids))
             if match:
-                selected.append(e.handle)
+                selected.append(e)
         return selected
 
     # ── Creator mutations ──────────────────────────────────────────────────────

@@ -1,111 +1,108 @@
 # Archiver
 
-> A Windows desktop application for batch-downloading media from **X (Twitter)**, **Douyin**, and **Bilibili**.
+**Batch-download and archive media from X (Twitter), Douyin, and Bilibili — on Windows.**
 
-[![Version](https://img.shields.io/badge/version-4.0.6-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
 ---
 
-## Overview
-
-Archiver lets you maintain a local archive of content from multiple social media accounts. Organise accounts under named creators, run scheduled syncs in the background, or manually trigger downloads on demand — all from a single dark/light themed desktop interface.
-
----
-
 ## Features
 
-- Download from **X (Twitter)**, **Douyin**, and **Bilibili**
-- **Update** mode (new posts only), **Full** mode (complete history), and **Auto** scheduled sync
-- Group accounts under named creators across platforms
-- Paste any post URL for an instant one-off download
-- Telegram bot — send a link from your phone and it downloads on the PC
-- Dark / light theme · English / Chinese
+| Feature | Description |
+|---------|-------------|
+| **Three platforms** | X (Twitter), Douyin, Bilibili |
+| **Sync modes** | Update (new only), Full (complete history), Auto (scheduled) |
+| **Creator groups** | Organise accounts across platforms under named creators |
+| **URL download** | Paste any post URL for an immediate one-off download |
+| **File browser** | In-app file list with double-click to open |
+| **Post index** | Track which downloaded posts have since been deleted (ghost check) |
+| **History log** | Per-run breakdown; double-click any file to open it |
+| **Telegram bot** | Send a link from your phone — it downloads on the PC |
+| **Theme & language** | Dark / light · English / Chinese |
 
 ---
 
 ## Installation
 
-Download the latest installer from the [Releases](https://github.com/GH-Acho177/media-downloader/releases/latest) page and run it. No additional dependencies required.
+Download the latest installer from the [Releases](https://github.com/GH-Acho177/media-downloader/releases/latest) page and run it. No additional setup required.
 
 ---
 
 ## Getting Started
 
-### 1. Authenticate
+### Authentication
 
 Each platform requires a browser cookie file.
 
 1. Install **[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** in Chrome or Edge.
-2. Log in to the target platform in your browser.
-3. Export cookies and save the `.txt` file locally.
-4. In Archiver: **Settings → Authentication → Import cookies.txt**
+2. Log in to the platform in your browser.
+3. Export cookies and save the `.txt` file.
+4. In Archiver → **Settings → Authentication → Import cookies.txt**
 
-### 2. Add Accounts
+### Adding Accounts
 
-Accounts are grouped under **Creators** in the Accounts panel.
+Go to the **Accounts** panel and add accounts under any Creator group.
 
-| Platform | Accepted Input |
+| Platform | Accepted input |
 |----------|----------------|
-| X (Twitter) | Profile URL (e.g. `https://x.com/username`) or bare username |
-| Douyin | Profile page URL or bare `sec_uid` |
-| Bilibili | Space page URL or bare UID |
+| X (Twitter) | Profile URL or bare username |
+| Douyin | Profile URL or bare `sec_uid` |
+| Bilibili | Space URL or bare UID |
 
-### 3. Download
+### Downloading
 
-- **Update** — fetches posts published since the last run.
-- **Full** — downloads the complete post history (optionally bounded by a date range).
-- **Auto** — runs Update silently on a timer; toggle from the dashboard.
+| Mode | Behaviour |
+|------|-----------|
+| **Update** | Fetches posts since the last run |
+| **Full** | Downloads complete history (optional date range) |
+| **Auto** | Runs Update on a timer in the background |
 
 ---
 
 ## Telegram Bot
 
-The Telegram bot lets you trigger downloads from your phone without touching the PC.
+Trigger downloads from your phone without touching the PC.
 
-### Setup
+**Setup**
 
-1. Create a bot via [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
-2. In Archiver: **Settings → Telegram Bot → paste the token → Save & Start**.
-3. Send your first message to the bot — your Telegram user ID is whitelisted automatically.
+1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token.
+2. In Archiver → **Settings → Telegram Bot → paste token → Save & Start**.
+3. Send any message to the bot — your user ID is whitelisted on first contact.
 
-### Sending a Post URL
+**Sending a post URL**
 
-Send any post link (X, Douyin, or Bilibili) and the download starts on the PC immediately.
+Send any post link (X, Douyin, or Bilibili). Supported formats:
 
-Supported formats:
-- Direct URLs: `https://x.com/user/status/…`, `https://www.bilibili.com/video/…`
-- Douyin short links: `https://v.douyin.com/XXXXX/`
-- Douyin share blurbs: the full copied text (e.g. `6.92 复制打开抖音… https://v.douyin.com/…`) — the URL is extracted automatically
-- Short links with UTM parameters (e.g. `https://b23.tv/…?utm_…`) — resolved before routing
+- `https://x.com/user/status/…`
+- `https://www.bilibili.com/video/…`
+- `https://v.douyin.com/XXXXX/` — short links resolved automatically
+- Douyin share blurbs (`6.92 复制打开抖音… https://v.douyin.com/…`) — URL extracted automatically
+- `https://b23.tv/…` — short links with UTM params resolved before routing
 
-### Adding an Account via Bot
+**Adding an account via bot**
 
-Send a **profile URL** instead of a post URL and the bot starts a guided flow:
+Send a profile URL and the bot starts a guided flow:
 
 ```
-You  →  https://v.douyin.com/XXXXX/          (profile share link)
-Bot  ←  📋 抖音 account: <display name>
-         Create a new creator for this account? (yes / no)
-
+You  →  https://v.douyin.com/XXXXX/
+Bot  ←  📋 Douyin account: <display name>
+        Create a new creator for this account? (yes / no)
 You  →  yes
 Bot  ←  ✓ Created creator '<display name>' and added the account.
 
-— or —
+         — or —
 
 You  →  no
 Bot  ←  Choose a creator:
-         1. Creator A
-         2. Creator B
-
+        1. Creator A
+        2. Creator B
 You  →  2
 Bot  ←  ✓ Added to 'Creator B'.
 ```
 
-Send `/cancel` at any point to abort the flow.
-
-The bot resolves short links and fetches the account's display name automatically for all three platforms.
+Send `/cancel` at any time to abort.
 
 ---
 
@@ -114,150 +111,179 @@ The bot resolves short links and fetches the account's display name automaticall
 ```
 downloads/
 ├── {Creator Name}/
-│   └── {media files…}
+│   └── {media files}
 └── Unassigned/
-    └── {media files…}
+    └── {media files}
 ```
 
 ---
 
 ## Running from Source
 
-**Install dependencies**
+**1. Python dependencies**
 
 ```bash
-pip install sv_ttk f2 aiohttp aiofiles pystray pillow
+pip install fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles
 ```
 
-`gallery-dl` and `yt-dlp` are bundled in the installer. When running from source, place their executables in `packaging/` (see [Building](#building)).
+`gallery-dl` and `yt-dlp` must be on `PATH` or placed in `packaging/`.
 
-**Launch**
+**2. Frontend**
 
 ```bash
-python app.py
+cd ui && npm install && npm run build && cd ..
+```
+
+**3. Run**
+
+```bash
+python run_api.py
 ```
 
 ---
 
-## Building
+## Building a Release
 
-**1. Install build dependencies**
+**1. Dependencies**
 
 ```bash
-pip install pyinstaller sv_ttk f2 aiohttp aiofiles pystray pillow
+pip install pyinstaller fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles
 ```
 
-**2. Place third-party binaries in `packaging/`**
+**2. Frontend** *(the PyInstaller spec bundles `ui/dist`)*
 
-| File | Source |
-|------|--------|
-| `gallery-dl.exe` | [github.com/mikf/gallery-dl/releases](https://github.com/mikf/gallery-dl/releases) |
-| `yt-dlp.exe` | [github.com/yt-dlp/yt-dlp/releases](https://github.com/yt-dlp/yt-dlp/releases) |
+```bash
+cd ui && npm run build && cd ..
+```
 
-**3. Build**
+**3. Third-party binaries** — place in `packaging/`
+
+| Binary | Source |
+|--------|--------|
+| `gallery-dl.exe` | [mikf/gallery-dl](https://github.com/mikf/gallery-dl/releases) |
+| `yt-dlp.exe` | [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases) |
+
+**4. PyInstaller**
 
 ```bash
 pyinstaller packaging/Archiver.spec
+# output: dist\Archiver\
 ```
 
-Output: `dist\Archiver\` (portable folder)
+**5. Installer** *(optional)*
 
-**4. Package installer** *(optional)*
-
-Compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to produce a single-file setup executable.
+Compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php).
 
 ---
 
 ## Project Structure
 
 ```
-app.py                    # Application entry point
+run_api.py              # Entry point — FastAPI server + pywebview window
 src/
-  config.py               # Constants, platform config, UI strings, theme colours
-  creator_store.py        # Creator / account persistence (config/creators.json)
-  utils.py                # Shared utilities
+  api.py                # All REST endpoints
+  config.py             # Platform config, constants, theme colours, i18n strings
+  creator_store.py      # Creator / account persistence
 helpers/
-  f2_user.py              # Douyin batch downloader
-  f2_one.py               # Douyin single-post downloader
-  tg_bot.py               # Telegram bot (stdlib urllib, no SDK)
+  f2_user.py            # Douyin batch downloader
+  f2_one.py             # Douyin single-post downloader
+  tg_bot.py             # Telegram bot (stdlib only, no SDK)
+ui/
+  src/                  # React + TypeScript source
+  dist/                 # Built frontend — served by FastAPI
 assets/
   icon.ico
 packaging/
-  Archiver.spec           # PyInstaller spec
-  installer.iss           # Inno Setup script
-  gallery-dl.exe          # (not tracked — download separately)
-  yt-dlp.exe              # (not tracked — download separately)
+  Archiver.spec         # PyInstaller spec
+  installer.iss         # Inno Setup script
 ```
 
 ---
 
-## Release Notes
+## Changelog
+
+### v5.0.0
+- **UI rewrite** — replaced Tkinter/sv_ttk with React + TypeScript, served by FastAPI (uvicorn) and embedded via pywebview. Entry point is now `run_api.py`.
+- Double-click any file in the Posts dialog or History log to open it with the default app
+- Hover highlight on all clickable file rows
+- History log filters out runs and accounts with zero new downloads (UI + API level)
+- Post index stores absolute paths; endpoint falls back to a root search if the path no longer resolves
+- Removed `app.py`, `src/utils.py`, `fonts/`, `sv_ttk` dependency
 
 ### v4.0.6
-- Accounts panel: circular avatar tiles now open a Posts dialog on click, showing all downloaded posts with gone posts marked in red
-- Ghost check integrated directly into the Posts dialog — no separate window
-- Fixed X (Twitter) avatar fetching by switching to gallery-dl JSON output instead of the deprecated guest token API
-- Hover ring on account tiles uses the platform's accent color; Douyin uses black
+- Avatar tiles in the Accounts panel open a Posts dialog showing all downloaded files, with deleted posts highlighted in red
+- Ghost check merged into the Posts dialog — no separate window
+- Fixed X avatar fetching (switched from deprecated guest-token API to gallery-dl JSON output)
 
 ### v4.0.5
-- Fixed: pasting an X (Twitter) profile URL when adding an account now correctly extracts the username instead of storing the full URL as the display name (affected both the quick-add bar and the Add Account dialog)
+- Fixed X profile URL incorrectly stored as display name when adding an account via URL
 
 ### v4.0.4
-- Installer now lets users choose install path (defaults to Program Files)
+- Installer prompts for install path (defaults to Program Files)
 
 ### v4.0.3
-- Update history hides user rows with no new downloads
-- Telegram bot "Stop" button no longer clears the saved token
+- History hides accounts with zero new downloads
+- Telegram bot Stop no longer clears the saved token
 
 ### v4.0.2
-- Douyin: increased `max_connections` and `max_tasks` from 5 → 10 for faster parallel downloads
-- Douyin: increased `page_counts` from 20 → 50 to reduce API listing round-trips
+- Douyin `max_connections` and `max_tasks` raised from 5 → 10
+- Douyin `page_counts` raised from 20 → 50 to reduce listing round-trips
 
 ### v4.0.1
-- Telegram bot queues URLs sent during an active download and processes them automatically when it finishes
-- Bot now replies with download result (complete / failed / stopped) after each bot-triggered download
+- Bot queues URLs received during an active download and processes them when it finishes
+- Bot replies with the download result after each bot-triggered job
 
 ### v4.0.0
-- Telegram bot account-sharing flow: send a profile URL from your phone to add it to a creator group
-- Bot detects platform from URL, resolves short links (v.douyin.com, b23.tv), and prompts to create a new creator or assign to an existing one
-- Display names fetched automatically for all platforms — Douyin via f2, Bilibili via API, X via gallery-dl
-- Supports all shared URL formats including share blurbs (Chinese text + short link) and UTM-tagged links
+- Telegram bot account-sharing flow: send a profile URL to add it to a creator group
+- Resolves short links (v.douyin.com, b23.tv) and fetches display names for all platforms
+- Supports share blurbs, short links, and UTM-tagged URLs
 
 ### v3.2.0
-- Telegram bot now handles account/profile URLs with a guided conversation flow
-- Sending a profile URL asks whether to create a new creator or add to an existing one
-- If adding to existing, bot lists current creators and waits for an index reply
-- Short URLs (v.douyin.com, b23.tv) are resolved in a background thread before routing
-- Share blurbs (Chinese text + URL) are correctly parsed to extract just the URL
+- Bot guided flow for profile URLs: create new creator or assign to existing
 - `/cancel` aborts any in-progress conversation
 
 ### v3.1.9
-- **Telegram Bot** — send a Douyin, X, or Bilibili URL from your phone to a Telegram bot and the download starts immediately on the PC; no extra software required, uses stdlib `urllib` only
-- Token and whitelist stored in `config/settings.json`; first message auto-whitelists the sender
-- Bot settings card added to the Settings panel (token entry, show/hide, Save & Start / Stop)
+- Telegram bot — stdlib-only implementation, no SDK required
+- Token and whitelist stored in `config/settings.json`; first message auto-whitelists sender
 
 ### v3.1.8
-- Fixed UI becoming non-interactive (gray/frozen window) during heavy download output
-- Log writes are now batched and flushed to the widget every 50 ms instead of scheduling one tkinter callback per output line — eliminates event-queue flooding that starved user input
+- Fixed frozen/unresponsive UI during heavy download output; log writes now batch-flushed every 50 ms
 
 ### v3.1.7
-- Corrupt-file detection now validates MP4 box structure, catching truncated downloads that partially play rather than just 0-byte files
-- Corrupt Douyin files are immediately re-downloaded via targeted single-post fetch instead of waiting for the next Full mode run
-- Leftover `.part` / `.tmp` partial-download stubs are cleaned up automatically
+- Corrupt-file detection validates MP4 box structure
+- Corrupt Douyin files re-downloaded immediately via single-post fetch
+- Leftover `.part` / `.tmp` stubs cleaned up automatically
 
 ### v3.1.6
-- Live log output with line-by-line streaming
+- Line-by-line live log output (unbuffered subprocess stdout)
 - Progressive inter-user sleep to reduce rate-limit exposure
-- Fixed filename sanitisation for X (Twitter) downloads
+- Fixed X filename sanitisation (`{date_url}` replaces unreliable `{date}`)
 
 ### v3.1.4
-- Auto-fetch account display names from the platform
-- Unassigned accounts listed first in the sidebar
-- Date prefixes on downloaded filenames
-- Configurable auto-sync interval setting
+- Display names auto-fetched from platform on account add
+- Configurable auto-sync interval
 
 ### v3.1.0
-- Dark title bar
+- Dark title bar (DwmSetWindowAttribute)
 - Animated theme transitions
-- ttk scrollbar in the log panel
-- Post URL button for single-post downloads
+- Post URL one-off download button on dashboard
+
+### v3.0.0
+- Renamed to **Archiver**
+- Download structure changed to `downloads/{Creator}/{account}/`
+- Parallel cross-platform downloads via per-platform thread pools
+- Combined per-run history record across all platforms
+
+### v2.1.2
+- DPI-aware scaling throughout
+- Persistent settings via `config/settings.json`
+- Moved `config.py` / `utils.py` into `src/` package
+
+### v2.0.0
+- Configurable download path
+- Auto-create runtime directories on startup
+- Subprocess console windows hidden in release builds
+
+### v1.0.0
+- Initial release — Tkinter GUI for X, Douyin, and Bilibili
+- Update mode, Full mode, parallel downloads, cookie import, dark/light theme, EN/ZH

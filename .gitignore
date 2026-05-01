@@ -1,5 +1,5 @@
 # ── Build output ──────────────────────────────────────────────────────────────
-dist/
+/dist/
 build/
 build.bat
 
@@ -20,10 +20,22 @@ config/bilibili_downloaded.txt
 config/douyin_last_run.json
 config/seen_announcements.json
 config/update_history.json
+config/settings.json
+config/download_path.txt
+config/lang.txt
+config/post_index.json
+config/avatars/
+config/archives/
+config/creator_store.json
 
 # ── Logs & downloads ──────────────────────────────────────────────────────────
 logs/
 downloads/
+
+# ── UI tooling / runtime ──────────────────────────────────────────────────────
+node_modules/
+.webview2/
+ui/dist/.index_app.html
 
 # ── IDE / tooling ──────────────────────────────────────────────────────────────
 .idea/

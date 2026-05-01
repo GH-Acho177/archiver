@@ -2,12 +2,30 @@
 Helper: download all post videos for a Douyin user into a flat output folder,
         bypassing f2's create_user_folder so the path is exactly what we specify.
 
-interval: 'all'  or  '2024-01-01|2024-12-31'
+interval:     'all'  or  '2024-01-01|2024-12-31'
+archive_file: path to a text file (one aweme_id per line) tracking seen posts.
+full:         True → re-download anything missing from disk (ignore archive).
+              False → skip anything in the archive; stop when a full page is all-seen.
 """
 
 import asyncio
 import sys
 from pathlib import Path
+
+
+def _load_archive(path: str) -> set:
+    p = Path(path)
+    if not p.exists():
+        return set()
+    return set(p.read_text("utf-8").splitlines())
+
+
+def _append_archive(path: str, ids: "set[str]") -> None:
+    if not ids:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        for aid in ids:
+            f.write(aid + "\n")
 
 
 async def download_user(
@@ -17,6 +35,8 @@ async def download_user(
     interval: str,
     naming: str = "{create:.10}_{aweme_id}",
     stop_check=None,
+    full: bool = False,
+    archive_file: str = "",
 ) -> None:
     from f2.apps.douyin.utils import ClientConfManager, SecUserIdFetcher
     from f2.apps.douyin.handler import DouyinHandler
@@ -30,7 +50,7 @@ async def download_user(
         "naming":          naming,
         "interval":        interval,
         "languages":       "en_US",
-        "timeout":         30,
+        "timeout":         5,
         "max_retries":     3,
         "max_connections": 10,
         "max_tasks":       10,
@@ -57,29 +77,51 @@ async def download_user(
     user_path = Path(outdir)
     user_path.mkdir(parents=True, exist_ok=True)
 
-    existing_ids = {
-        p.stem.rsplit("_", 1)[-1]
-        for p in user_path.iterdir()
-        if p.is_file()
-    } if user_path.exists() else set()
+    if full:
+        # Full mode: re-download anything no longer on disk.
+        seen_ids = {
+            p.stem.rsplit("_", 1)[-1]
+            for p in user_path.iterdir()
+            if p.is_file()
+        }
+    else:
+        # Update mode: trust the archive — a post is "seen" even if its file
+        # was deleted. Stop fetching once a whole page is already seen.
+        seen_ids = _load_archive(archive_file) if archive_file else set()
 
-    async for aweme_data_list in handler.fetch_user_post_videos(
-        sec_user_id, min_cursor, max_cursor,
-        kwargs["page_counts"], kwargs["max_counts"]
-    ):
-        if stop_check and stop_check():
-            break
-        items = [item for item in aweme_data_list._to_list()
-                 if str(item.get("aweme_id", "")) not in existing_ids]
-        for item in items:
-            if not item.get("nickname"):
-                item["nickname"] = "unknown"
-            if not item.get("create"):
-                item["create"] = item.get("aweme_id", "unknown")
-        if items:
-            await handler.downloader.create_download_tasks(
-                kwargs, items, user_path
-            )
+    try:
+        async for aweme_data_list in handler.fetch_user_post_videos(
+            sec_user_id, min_cursor, max_cursor,
+            kwargs["page_counts"], kwargs["max_counts"]
+        ):
+            if stop_check and stop_check():
+                break
+            page  = aweme_data_list._to_list()
+
+            # Update mode: Douyin returns newest-first. If the first post in
+            # the page is already seen, everything older is also seen — stop.
+            if not full and page and str(page[0].get("aweme_id", "")) in seen_ids:
+                break
+
+            items = [item for item in page
+                     if str(item.get("aweme_id", "")) not in seen_ids]
+
+            for item in items:
+                if not item.get("nickname"):
+                    item["nickname"] = "unknown"
+                if not item.get("create"):
+                    item["create"] = item.get("aweme_id", "unknown")
+
+            if items:
+                await handler.downloader.create_download_tasks(
+                    kwargs, items, user_path
+                )
+                new_ids = {str(item["aweme_id"]) for item in items if item.get("aweme_id")}
+                seen_ids.update(new_ids)
+                if archive_file:
+                    _append_archive(archive_file, new_ids)
+    finally:
+        await handler.downloader.close()
 
 
 async def main() -> None:

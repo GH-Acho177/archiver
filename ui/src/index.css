@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Theme tokens (RGB channels — required for Tailwind opacity modifiers) ── */
+
+:root, [data-theme="dark"] {
+  --color-bg:      43  43  43;   /* #2b2b2b */
+  --color-panel:   60  63  65;   /* #3c3f41 */
+  --color-hover:   75  75  75;   /* #4b4b4b */
+  --color-border:  81  81  81;   /* #515151 */
+  --color-text:    187 187 187;  /* #bbbbbb */
+  --color-dim:     107 107 107;  /* #6b6b6b */
+  --color-accent:  74  155 202;  /* #4a9bca */
+  --color-log-bg:  31  35  39;   /* #1f2327 */
+
+  --scrollbar-thumb: #515151;
+  --scrollbar-hover: #6b6b6b;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --color-bg:      232 232 232;  /* #e8e8e8 */
+  --color-panel:   255 255 255;  /* #ffffff */
+  --color-hover:   240 240 240;  /* #f0f0f0 */
+  --color-border:  208 208 208;  /* #d0d0d0 */
+  --color-text:    26  26  26;   /* #1a1a1a */
+  --color-dim:     118 118 118;  /* #767676 */
+  --color-accent:  30  110 181;  /* #1e6eb5 */
+  --color-log-bg:  248 248 248;  /* #f8f8f8 */
+
+  --scrollbar-thumb: #d0d0d0;
+  --scrollbar-hover: #a0a0a0;
+  color-scheme: light;
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: rgb(var(--color-bg));
+  color: rgb(var(--color-text));
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar              { width: 6px; height: 6px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover  { background: var(--scrollbar-hover); }
+
+/* ── Log output colorization ─────────────────────────────────────────────── */
+
+.log-line-error   { color: #f07070; }
+.log-line-warning { color: #e8c87a; }
+.log-line-success { color: #6aaf6a; }
+.log-line-dim     { color: rgb(var(--color-border)); }
+.log-line-info    { color: rgb(var(--color-accent)); }
