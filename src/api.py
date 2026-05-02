@@ -24,7 +24,10 @@ import sys, os
 # Dev: __file__ is src/api.py — go up to the project root.
 if getattr(sys, "frozen", False):
     _ROOT    = Path(sys.executable).resolve().parent
-    _HELPERS = Path(getattr(sys, "_MEIPASS", _ROOT)) / "helpers"
+    _MEIPASS = Path(getattr(sys, "_MEIPASS", _ROOT))
+    _HELPERS = _MEIPASS / "helpers"
+    # Add _internal\ to PATH so subprocess can find bundled yt-dlp.exe / gallery-dl.exe
+    os.environ["PATH"] = str(_MEIPASS) + os.pathsep + os.environ.get("PATH", "")
 else:
     _ROOT    = Path(__file__).resolve().parent.parent
     _HELPERS = _ROOT / "helpers"
