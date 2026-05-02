@@ -389,6 +389,7 @@ class AppState:
             from_date = (dt.date.today() - dt.timedelta(days=self._from_days)).isoformat()
 
         sleep_user = float(cfg.get("sleep_user", 2))
+        sleep_req  = float(cfg.get("sleep_req",  1))
         workers    = int(cfg.get("parallel_workers", 1))
         dl_root    = self._download_root()
 
@@ -508,6 +509,7 @@ class AppState:
                     stop_check=self.stop_flag.is_set,
                     full=full,
                     archive_file=arc_f2,
+                    sleep_req=sleep_req,
                 ))
             except Exception as exc:
                 import traceback as _tb

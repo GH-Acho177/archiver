@@ -40,6 +40,7 @@ async def download_user(
     stop_check=None,
     full: bool = False,
     archive_file: str = "",
+    sleep_req: float = 1.0,
 ) -> None:
     from f2.apps.douyin.utils import ClientConfManager, SecUserIdFetcher
     from f2.apps.douyin.handler import DouyinHandler
@@ -106,6 +107,8 @@ async def download_user(
         ):
             if stop_check and stop_check():
                 break
+            if sleep_req > 0:
+                await asyncio.sleep(sleep_req)
             page  = aweme_data_list._to_list()
 
             items = [item for item in page

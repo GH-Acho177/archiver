@@ -2,7 +2,7 @@
 
 **Batch-download and archive media from X (Twitter), Douyin, and Bilibili — on Windows.**
 
-[![Version](https://img.shields.io/badge/version-5.0.1-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-5.0.2-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -201,6 +201,9 @@ packaging/
 ---
 
 ## Changelog
+
+### v5.0.2
+- Wire `sleep_req` setting into Douyin (f2) page fetches — defaults to 1s between API pages to avoid rate limiting
 
 ### v5.0.1
 - Auto-detect and remove corrupt/truncated media files during sync; re-download on next run (Douyin archive entries also purged)
