@@ -141,7 +141,10 @@ class AppState:
         text = _strip_ansi(text)
         _file_log(text)
         if not isinstance(sys.stdout, _PrintCapture):
-            print(text, end="", flush=True)
+            try:
+                print(text, end="", flush=True)
+            except (UnicodeEncodeError, AttributeError, TypeError):
+                pass
         if not self._loop or self._loop.is_closed():
             return
         for q in list(self._log_listeners):
@@ -525,13 +528,13 @@ class AppState:
                         cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         stdin=subprocess.DEVNULL,
-                        text=True, encoding="utf-8", errors="replace",
                         creationflags=_NO_WINDOW if sys.platform == "win32" else 0,
                     )
                     with self._procs_lock:
                         self._procs.append(proc)
                     self._proc = proc
-                    for line in proc.stdout:
+                    for raw in proc.stdout:
+                        line = raw.decode("utf-8", errors="replace")
                         self.log_write(line)
                         if dl == "gallery-dl" and not full and line.startswith("# "):
                             proc.terminate()
@@ -1004,11 +1007,11 @@ def _url_worker(cmd: list[str]):
         proc = _sp.Popen(
             cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
             stdin=_sp.DEVNULL,
-            text=True, encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW if sys.platform == "win32" else 0,
         )
         state._proc = proc
-        for line in proc.stdout:
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace")
             state.log_write(line)
             if state.stop_flag.is_set():
                 proc.terminate()
