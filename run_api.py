@@ -14,12 +14,13 @@ from PIL import Image, ImageDraw
 PORT = 5173
 URL  = f"http://127.0.0.1:{PORT}"
 
-# Give WebView2 its own data folder inside the project so it never reads a
-# stale global cache from a previous app version.
-os.environ.setdefault(
-    "WEBVIEW2_USER_DATA_FOLDER",
-    str(Path(__file__).parent / ".webview2"),
-)
+# Give WebView2 a writable data folder. When frozen (installed), _internal\ is
+# read-only, so use %LOCALAPPDATA%\Archiver instead.
+if getattr(sys, "frozen", False):
+    _wv2_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Archiver" / ".webview2"
+else:
+    _wv2_dir = Path(__file__).parent / ".webview2"
+os.environ.setdefault("WEBVIEW2_USER_DATA_FOLDER", str(_wv2_dir))
 
 _window:            "webview.Window | None" = None
 _tray:              "pystray.Icon | None"   = None
@@ -239,9 +240,11 @@ def _wait_for_server(timeout: float = 10.0) -> bool:
 # ── Tray ──────────────────────────────────────────────────────────────────────
 
 def _make_icon() -> Image.Image:
+    ico = Path(__file__).parent / "assets" / "icon.ico"
+    if ico.exists():
+        return Image.open(ico).convert("RGBA")
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d   = ImageDraw.Draw(img)
-    d.ellipse([4, 4, 60, 60], fill=(29, 155, 240, 255))
+    ImageDraw.Draw(img).ellipse([4, 4, 60, 60], fill=(29, 155, 240, 255))
     return img
 
 

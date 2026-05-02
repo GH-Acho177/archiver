@@ -20,8 +20,16 @@ from pydantic import BaseModel
 
 import sys, os
 
-_ROOT = Path(__file__).resolve().parent.parent
+# Frozen (PyInstaller): __file__ is _internal\src\api.pyc — go up to the EXE dir.
+# Dev: __file__ is src/api.py — go up to the project root.
+if getattr(sys, "frozen", False):
+    _ROOT    = Path(sys.executable).resolve().parent
+    _HELPERS = Path(getattr(sys, "_MEIPASS", _ROOT)) / "helpers"
+else:
+    _ROOT    = Path(__file__).resolve().parent.parent
+    _HELPERS = _ROOT / "helpers"
 sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_HELPERS))
 os.chdir(_ROOT)
 
 from src.creator_store import CreatorStore
@@ -173,7 +181,7 @@ class AppState:
     def start_tg_bot(self, token: str) -> None:
         self.stop_tg_bot()
         import sys as _sys
-        _sys.path.insert(0, str(_ROOT / "helpers"))
+        _sys.path.insert(0, str(_HELPERS))
         try:
             import tg_bot as _tg
             self._tg_bot = _tg.TelegramBot(
@@ -412,7 +420,7 @@ class AppState:
         # ── f2 (Douyin) — Python library, not CLI ─────────────────────────────
         if dl == "f2":
             import asyncio as _aio
-            sys.path.insert(0, str(_ROOT / "helpers"))
+            sys.path.insert(0, str(_HELPERS))
             try:
                 import f2_user as _f2_user
             except ImportError:
@@ -882,13 +890,16 @@ class TgStartRequest(BaseModel):
 @app.post("/api/telegram/start")
 def tg_start(req: TgStartRequest):
     token = req.token.strip()
-    if not token:
-        raise HTTPException(400, "Token is required")
     s = {}
     try:
         s = json.loads(Path(SETTINGS_FILE).read_text("utf-8"))
     except Exception:
         pass
+    # "reuse" is a UI sentinel meaning "restart with the already-saved token"
+    if not token or token == "reuse":
+        token = s.get("telegram_token", "")
+    if not token:
+        raise HTTPException(400, "Token is required")
     s["telegram_token"] = token
     Path(SETTINGS_FILE).write_text(json.dumps(s, indent=2, ensure_ascii=False), "utf-8")
     state.start_tg_bot(token)
@@ -921,7 +932,7 @@ def reset_database():
 
 def _f2_one_worker(url_or_id: str, cookie_str: str, outdir: str) -> None:
     import asyncio as _aio
-    sys.path.insert(0, str(_ROOT / "helpers"))
+    sys.path.insert(0, str(_HELPERS))
     try:
         # Resolve aweme_id: if it's already a pure numeric ID use it directly,
         # otherwise let f2's AwemeIdFetcher resolve any URL (short or long).
@@ -1043,7 +1054,7 @@ def _fetch_avatar_bg(platform: str, account_id: str) -> None:
             if not cf.exists():
                 return
             import asyncio as _aio
-            sys.path.insert(0, str(_ROOT / "helpers"))
+            sys.path.insert(0, str(_HELPERS))
             from f2.apps.douyin.handler import DouyinHandler
             from f2.apps.douyin.utils import ClientConfManager
             kw = {
@@ -1169,7 +1180,7 @@ def _run_ghost_check_bg(platform: str, account_id: str, job_key: str) -> None:
 
     if platform == "douyin":
         import asyncio as _aio
-        sys.path.insert(0, str(_ROOT / "helpers"))
+        sys.path.insert(0, str(_HELPERS))
         try:
             from f2.apps.douyin.handler import DouyinHandler
             from f2.apps.douyin.utils import ClientConfManager
