@@ -63,6 +63,44 @@ function classifyLine(line: string): string {
   return "";
 }
 
+function simplifyLines(lines: string[]): string[] {
+  const out: string[] = [];
+  let pendingDest: string | null = null;
+
+  for (const line of lines) {
+    // Track download destination (non-fragment files)
+    const destMatch = line.match(/^\[download\] Destination:\s*(.+)/);
+    if (destMatch) {
+      const dest = destMatch[1].trim();
+      pendingDest = /\.f\d+\.(mp4|m4a|webm|ts)$/.test(dest)
+        ? null
+        : dest.replace(/.*[/\\]/, "");
+      continue;
+    }
+
+    // Collapse 100% completion into one clean line
+    const doneMatch = line.match(/^\[download\]\s+100% of\s+([\d.]+\s*\w+)/);
+    if (doneMatch) {
+      if (pendingDest) out.push(`  ↓ ${pendingDest}  (${doneMatch[1].replace(/\s+/, " ")})`);
+      pendingDest = null;
+      continue;
+    }
+
+    // Drop all remaining [download] lines (progress, resume, playlist, etc.)
+    if (/^\[download\]/.test(line)) continue;
+
+    // Drop yt-dlp / gallery-dl noise
+    if (/^\[Merger\]|^\[Fixup|^Deleting original file/.test(line)) continue;
+    if (/Format\(s\).+missing/.test(line)) continue;
+    if (/^\[(BiliBili|BilibiliSpaceVideo|youtube|Twitter|twitch|TikTok)\].+(Extracting|Downloading|Parsing|Anthology|Chapter|Wbi|Space|Webpage|Playlist)/i.test(line)) continue;
+    if (/has already been downloaded/.test(line)) continue;
+    if (/^\[info\]/.test(line)) continue;
+
+    out.push(line);
+  }
+  return out;
+}
+
 const DEFAULT_STATUS: Status = {
   running: false, status: "Idle", mode: "update",
   from_days: 0, tracking: 0, last_sync: "—", version: "",
@@ -265,6 +303,7 @@ export default function Dashboard({ active }: { active: boolean }) {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [error, setError]       = useState("");
   const [showDl, setShowDl]     = useState(false);
+  const [simpleLog, setSimpleLog] = useState(true);
   const [autoSync, setAutoSync] = useState(false);
   const [showSyncModal, setShowSyncModal]   = useState(false);
   const [activeTab, setActiveTab]           = useState<"log" | "history">("log");
@@ -491,6 +530,7 @@ export default function Dashboard({ active }: { active: boolean }) {
         >
           {t("dash.dl_url")}
         </button>
+
       </div>
 
       {/* Error banner */}
@@ -517,12 +557,39 @@ export default function Dashboard({ active }: { active: boolean }) {
           </button>
         ))}
         {activeTab === "log" && (
-          <button
-            onClick={() => setLogLines([])}
-            className="ml-auto px-4 py-2 text-sm text-dim hover:text-text transition-colors"
-          >
-            {t("dash.clear")}
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            <div className="flex rounded overflow-hidden border border-border text-xs mr-2">
+              {(["simple", "full"] as const).map(v => (
+                <button
+                  key={v}
+                  onClick={() => setSimpleLog(v === "simple")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    (v === "simple") === simpleLog
+                      ? "bg-accent text-white"
+                      : "bg-panel text-dim hover:bg-hover"
+                  }`}
+                >
+                  {v === "simple" ? t("dash.log_simple") : t("dash.log_full")}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => {
+                const lines = simpleLog ? simplifyLines(logLines) : logLines;
+                navigator.clipboard.writeText(lines.join("\n")).catch(() => {});
+              }}
+              disabled={logLines.length === 0}
+              className="px-4 py-2 text-sm text-dim hover:text-text disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              {t("dash.copy")}
+            </button>
+            <button
+              onClick={() => setLogLines([])}
+              className="px-4 py-2 text-sm text-dim hover:text-text transition-colors"
+            >
+              {t("dash.clear")}
+            </button>
+          </div>
         )}
         {activeTab === "history" && (
           <button
@@ -544,9 +611,10 @@ export default function Dashboard({ active }: { active: boolean }) {
           {logLines.length === 0 ? (
             <span className="text-dim">{t("dash.log_empty")}</span>
           ) : (
-            logLines.map((line, i) => (
-              <div key={i} className={classifyLine(line)}>{line}</div>
-            ))
+            (simpleLog ? simplifyLines(logLines) : logLines)
+              .map((line, i) => (
+                <div key={i} className={classifyLine(line)}>{line}</div>
+              ))
           )}
         </div>
       )}

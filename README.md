@@ -2,7 +2,7 @@
 
 **Batch-download and archive media from X (Twitter), Douyin, and Bilibili — on Windows.**
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-5.0.1-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -201,6 +201,10 @@ packaging/
 ---
 
 ## Changelog
+
+### v5.0.1
+- Auto-detect and remove corrupt/truncated media files during sync; re-download on next run (Douyin archive entries also purged)
+- Simple log mode: collapses download progress into single `↓ filename (size)` lines, hides extractor/merger/already-downloaded noise
 
 ### v5.0.0
 - **UI rewrite** — replaced Tkinter/sv_ttk with React + TypeScript, served by FastAPI (uvicorn) and embedded via pywebview. Entry point is now `run_api.py`.

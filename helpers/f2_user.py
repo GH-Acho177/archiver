@@ -9,8 +9,11 @@ full:         True → re-download anything missing from disk (ignore archive).
 """
 
 import asyncio
+import re
 import sys
 from pathlib import Path
+
+_AWEME_ID_RE = re.compile(r"\d{15,20}")
 
 
 def _load_archive(path: str) -> set:
@@ -85,9 +88,16 @@ async def download_user(
             if p.is_file()
         }
     else:
-        # Update mode: trust the archive — a post is "seen" even if its file
-        # was deleted. Stop fetching once a whole page is already seen.
+        # Update mode: trust the archive when it has entries.
+        # If empty (first run / reset), seed from files already on disk so we
+        # stop early instead of fetching all history.
         seen_ids = _load_archive(archive_file) if archive_file else set()
+        if not seen_ids and user_path.exists():
+            seen_ids = {
+                p.stem.rsplit("_", 1)[-1]
+                for p in user_path.iterdir()
+                if p.is_file()
+            }
 
     try:
         async for aweme_data_list in handler.fetch_user_post_videos(
@@ -98,13 +108,13 @@ async def download_user(
                 break
             page  = aweme_data_list._to_list()
 
-            # Update mode: Douyin returns newest-first. If the first post in
-            # the page is already seen, everything older is also seen — stop.
-            if not full and page and str(page[0].get("aweme_id", "")) in seen_ids:
-                break
-
             items = [item for item in page
                      if str(item.get("aweme_id", "")) not in seen_ids]
+
+            # Update mode: if every post in this page is already archived,
+            # we've caught up — no need to fetch older pages.
+            if not full and page and not items:
+                break
 
             for item in items:
                 if not item.get("nickname"):
@@ -117,9 +127,17 @@ async def download_user(
                     kwargs, items, user_path
                 )
                 new_ids = {str(item["aweme_id"]) for item in items if item.get("aweme_id")}
-                seen_ids.update(new_ids)
+                seen_ids.update(new_ids)  # in-run dedup regardless of success
                 if archive_file:
-                    _append_archive(archive_file, new_ids)
+                    # Only persist IDs where at least one file landed on disk.
+                    # 丢失 (all CDN links failed) leaves no file, so those IDs
+                    # stay out of the archive and are retried next run.
+                    on_disk = {
+                        m.group()
+                        for p in user_path.iterdir() if p.is_file()
+                        for m in [_AWEME_ID_RE.search(p.stem)] if m
+                    }
+                    _append_archive(archive_file, new_ids & on_disk)
     finally:
         await handler.downloader.close()
 

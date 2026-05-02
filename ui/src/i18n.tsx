@@ -30,6 +30,9 @@ const STRINGS = {
     // Dashboard — tabs
     "dash.tab_log":     "Log",
     "dash.tab_history": "History",
+    "dash.log_simple":  "Simple",
+    "dash.log_full":    "Full",
+    "dash.copy":        "Copy",
     "dash.clear":       "Clear",
     "dash.log_empty":   "Log output will appear here when a sync is running…",
     "dash.hist_empty":  "No download history yet.",
@@ -192,6 +195,9 @@ const STRINGS = {
     // Dashboard — tabs
     "dash.tab_log":     "日志",
     "dash.tab_history": "历史",
+    "dash.log_simple":  "简洁",
+    "dash.log_full":    "完整",
+    "dash.copy":        "复制",
     "dash.clear":       "清空",
     "dash.log_empty":   "同步运行时日志将显示在这里…",
     "dash.hist_empty":  "暂无下载历史。",

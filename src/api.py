@@ -79,6 +79,33 @@ _TWEET_ID_RE  = re.compile(r"(?:^|_)(\d{15,20})(?:_\d+)*(?:_|$)")
 _DOUYIN_ID_RE = re.compile(r"(\d{15,20})")
 _BVID_RE      = re.compile(r"(BV[a-zA-Z0-9]{10})")
 
+# ── Corrupt-file detection ────────────────────────────────────────────────────
+
+_MIN_VIDEO_BYTES = 50 * 1024  # 50 KB minimum — anything smaller is truncated
+_MP4_BOX_TYPES   = {b"ftyp", b"mdat", b"moov", b"free", b"wide", b"skip", b"pdin"}
+
+
+def _is_valid_video(path: Path) -> bool:
+    try:
+        if path.stat().st_size < _MIN_VIDEO_BYTES:
+            return False
+        with path.open("rb") as f:
+            header = f.read(12)
+        if len(header) < 8:
+            return False
+        box_type = header[4:8]
+        if box_type in _MP4_BOX_TYPES:
+            return True
+        if header[:4] == b"\x1a\x45\xdf\xa3":  # WebM
+            return True
+        if header[:4] == b"RIFF":               # AVI
+            return True
+        if header[0] == 0x47:                   # MPEG-TS
+            return True
+        return False
+    except OSError:
+        return False
+
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
@@ -556,6 +583,31 @@ class AppState:
         new_files = [f for f in (after - before)
                      if f.is_file() and f.suffix.lower() in _MEDIA_EXTS]
 
+        # Check only newly downloaded files for corruption
+        corrupt_files: list[Path] = [f for f in new_files if not _is_valid_video(f)]
+        if corrupt_files:
+            bad_ids: set[str] = set()
+            for f in corrupt_files:
+                self.log_write(f"  [corrupt] {f.name} — removed for re-download\n")
+                mo = _DOUYIN_ID_RE.search(f.stem)
+                if mo:
+                    bad_ids.add(mo.group(1))
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            # Purge from Douyin archive so next Update sync picks them up
+            if bad_ids and dl == "f2":
+                safe_h = re.sub(r'[\\/:*?"<>|]', "_", handle).strip()
+                arc_f2 = Path(ARCHIVES_DIR) / f"douyin_{safe_h}.txt"
+                if arc_f2.exists():
+                    try:
+                        lines = arc_f2.read_text("utf-8").splitlines()
+                        kept  = [l for l in lines if l.strip() not in bad_ids]
+                        arc_f2.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+                    except Exception:
+                        pass
+
         # Index newly downloaded files immediately
         if new_files:
             import datetime as _dt
@@ -588,7 +640,7 @@ class AppState:
             "handle":   handle,
             "display":  display,
             "count":    len(new_files),
-            "corrupt":  0,
+            "corrupt":  len(corrupt_files),
             "files":    [f.name for f in new_files],
             "folder":   str(watch_dir),
         }

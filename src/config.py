@@ -1,4 +1,4 @@
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.0.1"
 POST_INDEX_FILE = "config/post_index.json"
 
 # ── Platform config ────────────────────────────────────────────────────────────
