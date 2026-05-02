@@ -44,6 +44,36 @@ from src.config import (
 
 _NO_WINDOW = 0x08000000  # Windows CREATE_NO_WINDOW flag (ignored on non-Windows)
 
+# ── Persistent log file ───────────────────────────────────────────────────────
+
+def _open_log_file():
+    try:
+        log_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Archiver"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return open(log_dir / "archiver.log", "a", encoding="utf-8", buffering=1)
+    except Exception:
+        return None
+
+_log_fh = _open_log_file()
+
+def _file_log(text: str) -> None:
+    if _log_fh:
+        try:
+            _log_fh.write(text)
+        except Exception:
+            pass
+
+# Log startup diagnostics once
+import datetime as _dt_startup
+_file_log(f"\n{'='*60}\n[startup] {_dt_startup.datetime.now().isoformat()}\n")
+_file_log(f"[startup] frozen={getattr(sys, 'frozen', False)}\n")
+_file_log(f"[startup] ROOT={_ROOT}\n")
+if getattr(sys, "frozen", False):
+    _file_log(f"[startup] MEIPASS={_MEIPASS}\n")
+    _file_log(f"[startup] HELPERS={_HELPERS}\n")
+    _file_log(f"[startup] PATH prefix={str(_MEIPASS)}\n")
+del _dt_startup
+
 _ANSI_RE      = re.compile(r"\x1b\[[0-9;]*[mK]")
 _TWEET_ID_RE  = re.compile(r"(?:^|_)(\d{15,20})(?:_\d+)*(?:_|$)")
 _DOUYIN_ID_RE = re.compile(r"(\d{15,20})")
@@ -109,6 +139,7 @@ class AppState:
 
     def log_write(self, text: str) -> None:
         text = _strip_ansi(text)
+        _file_log(text)
         if not isinstance(sys.stdout, _PrintCapture):
             print(text, end="", flush=True)
         if not self._loop or self._loop.is_closed():
@@ -426,8 +457,11 @@ class AppState:
             sys.path.insert(0, str(_HELPERS))
             try:
                 import f2_user as _f2_user
-            except ImportError:
-                self.log_write("[error] f2_user helper not found in helpers/\n")
+            except Exception as _ie:
+                import traceback as _tb
+                msg = f"[error] f2_user import failed: {_ie}\n{_tb.format_exc()}"
+                self.log_write(msg)
+                _file_log(msg)
                 return None
 
             today      = _dt.date.today().isoformat()
@@ -446,7 +480,10 @@ class AppState:
                     archive_file=arc_f2,
                 ))
             except Exception as exc:
-                self.log_write(f"[error] f2 download failed: {exc}\n")
+                import traceback as _tb
+                msg = f"[error] f2 download failed: {exc}\n{_tb.format_exc()}"
+                self.log_write(msg)
+                _file_log(msg)
             finally:
                 sys.stdout = old_stdout
 
@@ -482,10 +519,14 @@ class AppState:
                         url]
 
             if cmd:
+                _file_log(f"[subprocess] cmd={cmd}\n")
                 try:
                     proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True, encoding="utf-8", errors="replace",
+                        creationflags=_NO_WINDOW if sys.platform == "win32" else 0,
                     )
                     with self._procs_lock:
                         self._procs.append(proc)
@@ -503,8 +544,10 @@ class AppState:
                     with self._procs_lock:
                         if proc in self._procs:
                             self._procs.remove(proc)
-                except FileNotFoundError:
-                    self.log_write(f"[error] {dl} not found — is it installed?\n")
+                except FileNotFoundError as exc:
+                    self.log_write(f"[error] {dl} not found — check PATH or bundled exe: {exc}\n")
+                except Exception as exc:
+                    self.log_write(f"[error] {dl} subprocess failed: {exc}\n")
 
         after     = set(watch_dir.rglob("*")) if watch_dir.exists() else set()
         new_files = [f for f in (after - before)
@@ -958,8 +1001,12 @@ def _f2_one_worker(url_or_id: str, cookie_str: str, outdir: str) -> None:
 def _url_worker(cmd: list[str]):
     import subprocess as _sp
     try:
-        proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
-                         text=True, encoding="utf-8", errors="replace")
+        proc = _sp.Popen(
+            cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            stdin=_sp.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW if sys.platform == "win32" else 0,
+        )
         state._proc = proc
         for line in proc.stdout:
             state.log_write(line)
