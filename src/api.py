@@ -151,8 +151,9 @@ class AppState:
         self._sched_stop:   threading.Event = threading.Event()
         self._next_sync_at: float = 0.0
 
-        self._tg_bot   = None
-        self._tg_status = "stopped"
+        self._tg_bot     = None
+        self._tg_status  = "stopped"
+        self._tg_pending: dict[int, dict] = {}  # chat_id → pending multi-step action
 
         # Auto-start scheduler and bot if previously enabled
         cfg = self._load_settings()
@@ -166,6 +167,18 @@ class AppState:
 
     def log_write(self, text: str) -> None:
         text = _strip_ansi(text)
+        # Simulate terminal carriage return: keep only the last \r-overwritten
+        # state per line so progress bars appear as a single updated line.
+        if "\r" in text:
+            segments = text.split("\n")
+            processed = []
+            for seg in segments:
+                if "\r" in seg:
+                    parts = [p for p in seg.split("\r") if p]
+                    processed.append(parts[-1] if parts else "")
+                else:
+                    processed.append(seg)
+            text = "\n".join(processed)
         _file_log(text)
         if not isinstance(sys.stdout, _PrintCapture):
             try:
@@ -269,6 +282,35 @@ class AppState:
     def _set_tg_status(self, s: str) -> None:
         self._tg_status = s
 
+    def _handle_tg_pending(self, pending: dict, text: str, chat_id: int) -> None:
+        if pending["action"] != "assign_group":
+            return
+        entry_id = pending["entry_id"]
+        creators = pending["creators"]
+        display  = pending["display"]
+        try:
+            n = int(text)
+        except ValueError:
+            if self._tg_bot:
+                self._tg_bot.send_message(chat_id, "⚠ Reply with a number.")
+            self._tg_pending[chat_id] = pending  # restore so they can retry
+            return
+        if n == 0:
+            creator = self._store.add_creator(display)
+            self._store.assign_entry(entry_id, creator.id)
+            if self._tg_bot:
+                self._tg_bot.send_message(chat_id, f"✅ {display} added to new group \"{creator.name}\".")
+            return
+        if 1 <= n <= len(creators):
+            c = creators[n - 1]
+            self._store.assign_entry(entry_id, c.id)
+            if self._tg_bot:
+                self._tg_bot.send_message(chat_id, f"✅ {display} added to {c.name}.")
+        else:
+            if self._tg_bot:
+                self._tg_bot.send_message(chat_id, f"⚠ Enter a number between 0 and {len(creators)}.")
+            self._tg_pending[chat_id] = pending  # restore so they can retry
+
     def _on_tg_message(self, text: str, chat_id: int, user_id: int) -> None:
         cfg     = self._load_settings()
         allowed = cfg.get("telegram_allowed_id")
@@ -284,6 +326,11 @@ class AppState:
             Path(SETTINGS_FILE).write_text(_j.dumps(s, indent=2, ensure_ascii=False), "utf-8")
             allowed = user_id
         if user_id != int(allowed):
+            return
+        # Handle pending multi-step flows (e.g. group selection after adding account)
+        pending = self._tg_pending.pop(chat_id, None)
+        if pending:
+            self._handle_tg_pending(pending, text.strip(), chat_id)
             return
         # Extract first URL from message — handles Douyin share text (Chinese + URL mixed)
         import re as _re
@@ -302,18 +349,47 @@ class AppState:
         pcfg    = PLATFORMS[pid]
         dl      = pcfg["downloader"]
         cookies = pcfg.get("cookies_file", "")
+
+        # X profile URL (no /status/) → add as tracked account
+        if pid == "x" and "/status/" not in url:
+            m = _re.search(r'(?:x|twitter)\.com/([A-Za-z0-9_]+)', url)
+            if m and m.group(1) not in {
+                "i", "home", "search", "explore", "notifications",
+                "messages", "settings", "intent", "compose",
+            }:
+                _tg_add_account("x", m.group(1), m.group(1), self._tg_bot, chat_id)
+                return
+
+        # Bilibili space URL or b23.tv short link → add as tracked account
+        if pid == "bilibili":
+            _bfinal = url
+            if "b23.tv/" in url.lower():
+                import urllib.request as _ulr
+                try:
+                    _req = _ulr.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    _bfinal = _ulr.urlopen(_req, timeout=8).geturl()
+                except Exception:
+                    pass
+            m = _re.search(r'space\.bilibili\.com/(\d+)', _bfinal)
+            if m:
+                uid  = m.group(1)
+                name = _fetch_bilibili_name(uid)
+                _tg_add_account("bilibili", f"{name}|{uid}", name, self._tg_bot, chat_id)
+                return
+
         self.running = True
         self.stop_flag.clear()
         self.status = "Downloading…"
-        if self._tg_bot:
-            self._tg_bot.send_message(chat_id, f"⬇ Downloading from {PLATFORMS[pid]['label']}…")
         if dl == "f2":
+            # "Downloading…" message is sent inside the worker after URL type is known
             cookie_str = _parse_cookies(cookies) if cookies and Path(cookies).exists() else ""
             url_dir = str(dl_root / "URL")
-            threading.Thread(target=_f2_one_worker,
-                args=(url, cookie_str, url_dir),
+            threading.Thread(target=_f2_bot_worker,
+                args=(url, cookie_str, url_dir, self._tg_bot, chat_id),
                 daemon=True).start()
             return
+        if self._tg_bot:
+            self._tg_bot.send_message(chat_id, f"⬇ Downloading from {PLATFORMS[pid]['label']}…")
         url_dir = str(dl_root / "URL")
         cmd: list[str] = []
         if dl == "gallery-dl":
@@ -389,7 +465,6 @@ class AppState:
             from_date = (dt.date.today() - dt.timedelta(days=self._from_days)).isoformat()
 
         sleep_user = float(cfg.get("sleep_user", 2))
-        sleep_req  = float(cfg.get("sleep_req",  1))
         workers    = int(cfg.get("parallel_workers", 1))
         dl_root    = self._download_root()
 
@@ -481,6 +556,8 @@ class AppState:
         watch_dir.mkdir(parents=True, exist_ok=True)
 
         before = set(watch_dir.rglob("*")) if watch_dir.exists() else set()
+
+        sleep_req = float(cfg.get("sleep_req", 1))
 
         # ── f2 (Douyin) — Python library, not CLI ─────────────────────────────
         if dl == "f2":
@@ -748,6 +825,86 @@ def add_entry(req: AddEntryRequest):
     e = state._store.add_entry(req.platform, req.handle, req.creator_id)
     return {"id": e.id, "platform": e.platform,
             "handle": e.handle, "creator_id": e.creator_id}
+
+
+class AddLinkRequest(BaseModel):
+    url: str
+
+@app.post("/api/accounts/add_link", status_code=201)
+def add_link(req: AddLinkRequest):
+    """Auto-detect platform from a profile URL and add as a tracked account."""
+    url = req.url.strip()
+    pid = _detect_platform(url)
+    if pid is None:
+        raise HTTPException(400, "Unrecognised link — paste a profile URL for X, Douyin, or Bilibili.")
+
+    import re as _re2
+
+    if pid == "x":
+        if "/status/" in url:
+            raise HTTPException(400, "That looks like a post URL — paste the profile page instead.")
+        m = _re2.search(r'(?:x|twitter)\.com/([A-Za-z0-9_]+)', url)
+        if not m or m.group(1) in {
+            "i", "home", "search", "explore", "notifications",
+            "messages", "settings", "intent", "compose",
+        }:
+            raise HTTPException(400, "Could not parse an X profile URL.")
+        username = m.group(1)
+        e = state._store.add_entry("x", username, None)
+        return {"id": e.id, "platform": "x", "handle": username, "display": username}
+
+    if pid == "bilibili":
+        final_url = url
+        if "b23.tv/" in url.lower():
+            import urllib.request as _ulr
+            try:
+                _req2 = _ulr.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                final_url = _ulr.urlopen(_req2, timeout=8).geturl()
+            except Exception:
+                pass
+        m = _re2.search(r'space\.bilibili\.com/(\d+)', final_url)
+        if not m:
+            raise HTTPException(400, "Paste a Bilibili user space URL (space.bilibili.com/UID or a b23.tv link that leads to one).")
+        uid    = m.group(1)
+        name   = _fetch_bilibili_name(uid)
+        handle = f"{name}|{uid}"
+        e = state._store.add_entry("bilibili", handle, None)
+        return {"id": e.id, "platform": "bilibili", "handle": handle, "display": name}
+
+    if pid == "douyin":
+        import asyncio as _aio
+        sys.path.insert(0, str(_HELPERS))
+        m = _re2.search(r'douyin\.com/user/([^/?&#\s]+)', url)
+        if m:
+            sec_uid = m.group(1)
+        else:
+            try:
+                from f2.apps.douyin.utils import SecUserIdFetcher
+                sec_uid = _aio.run(SecUserIdFetcher.get_sec_user_id(url))
+            except Exception:
+                raise HTTPException(400, "Could not resolve a Douyin profile URL.")
+        nickname = sec_uid
+        try:
+            from f2.apps.douyin.handler import DouyinHandler
+            from f2.apps.douyin.utils import ClientConfManager
+            cookies   = PLATFORMS["douyin"].get("cookies_file", "")
+            cookie_str = _parse_cookies(cookies) if cookies and Path(cookies).exists() else ""
+            kw = {
+                "cookie": cookie_str, "languages": "zh_CN",
+                "timeout": 10, "max_retries": 1, "max_connections": 2, "max_tasks": 2,
+                "page_counts": 20, "max_counts": None, "headers": ClientConfManager.headers(),
+            }
+            async def _nick():
+                p = await DouyinHandler(kw).fetch_user_profile(sec_uid)
+                return getattr(p, "nickname", None) or sec_uid
+            nickname = _aio.run(_nick())
+        except Exception:
+            pass
+        handle = f"{nickname}|{sec_uid}"
+        e = state._store.add_entry("douyin", handle, None)
+        return {"id": e.id, "platform": "douyin", "handle": handle, "display": nickname}
+
+    raise HTTPException(400, "Unsupported platform")
 
 
 @app.delete("/api/accounts/entries/{entry_id}", status_code=204)
@@ -1053,6 +1210,99 @@ def _f2_one_worker(url_or_id: str, cookie_str: str, outdir: str) -> None:
         state.running = False
         state.status = "Idle"
         state.log_write("─" * 44 + "\n")
+
+
+def _f2_bot_worker(url_or_id: str, cookie_str: str, outdir: str, bot, chat_id: int) -> None:
+    """Bot-triggered f2 worker: handles video downloads and profile-URL account addition."""
+    import asyncio as _aio
+    import re as _re2
+    sys.path.insert(0, str(_HELPERS))
+    try:
+        # Direct profile URL — extract sec_uid without a network resolve call
+        m = _re2.search(r'douyin\.com/user/([^/?&#\s]+)', url_or_id)
+        if m:
+            _aio.run(_add_douyin_account_async(m.group(1), cookie_str, bot, chat_id))
+            return
+
+        if url_or_id.isdigit():
+            aweme_id = url_or_id
+            if bot:
+                bot.send_message(chat_id, "⬇ Downloading from 抖音…")
+        else:
+            from f2.apps.douyin.utils import AwemeIdFetcher, SecUserIdFetcher
+            try:
+                aweme_id = _aio.run(AwemeIdFetcher.get_aweme_id(url_or_id))
+                state.log_write(f"Resolved : {aweme_id}\n")
+                if bot:
+                    bot.send_message(chat_id, "⬇ Downloading from 抖音…")
+            except Exception:
+                # Short link resolved to a profile page — add as tracked account
+                sec_uid = _aio.run(SecUserIdFetcher.get_sec_user_id(url_or_id))
+                _aio.run(_add_douyin_account_async(sec_uid, cookie_str, bot, chat_id))
+                return
+        import f2_one as _f2_one
+        _aio.run(_f2_one.download_one(aweme_id, cookie_str, outdir))
+    except Exception as exc:
+        state.log_write(f"[error] f2 download failed: {exc}\n")
+    finally:
+        state.running = False
+        state.status = "Idle"
+        state.log_write("─" * 44 + "\n")
+
+
+async def _add_douyin_account_async(sec_uid: str, cookie_str: str, bot, chat_id: int) -> None:
+    """Fetch the Douyin display name then delegate to _tg_add_account."""
+    sys.path.insert(0, str(_HELPERS))
+    try:
+        from f2.apps.douyin.handler import DouyinHandler
+        from f2.apps.douyin.utils import ClientConfManager
+        kw = {
+            "cookie": cookie_str,
+            "languages": "zh_CN",
+            "timeout": 15, "max_retries": 2, "max_connections": 2, "max_tasks": 2,
+            "page_counts": 20, "max_counts": None, "headers": ClientConfManager.headers(),
+        }
+        profile  = await DouyinHandler(kw).fetch_user_profile(sec_uid)
+        nickname = getattr(profile, "nickname", None) or sec_uid
+    except Exception:
+        nickname = sec_uid
+    _tg_add_account("douyin", f"{nickname}|{sec_uid}", nickname, bot, chat_id)
+
+
+def _fetch_bilibili_name(uid: str) -> str:
+    """Return Bilibili display name for *uid*; falls back to uid on any failure."""
+    import urllib.request as _ulr, json as _j
+    try:
+        req = _ulr.Request(
+            f"https://api.bilibili.com/x/web-interface/card?mid={uid}",
+            headers={"User-Agent": "Mozilla/5.0",
+                     "Referer":    "https://space.bilibili.com/"},
+        )
+        data = _j.loads(_ulr.urlopen(req, timeout=8).read().decode("utf-8"))
+        return data["data"]["card"]["name"] or uid
+    except Exception:
+        return uid
+
+
+def _tg_add_account(pid: str, handle: str, display: str, bot, chat_id: int) -> None:
+    """Add a tracked account and, if groups exist, prompt for group assignment via bot."""
+    entry    = state._store.add_entry(pid, handle, None)
+    state.log_write(f"Added {pid} account: {display}\n")
+    creators = state._store.all_creators()
+    if creators and bot:
+        lines = [f"✅ Added: {display}.",
+                 "Which group? Reply with a number, or 0 to create a new group:"]
+        for i, c in enumerate(creators, 1):
+            lines.append(f"{i}. {c.name}")
+        bot.send_message(chat_id, "\n".join(lines))
+        state._tg_pending[chat_id] = {
+            "action":   "assign_group",
+            "entry_id": entry.id,
+            "creators": creators,
+            "display":  display,
+        }
+    elif bot:
+        bot.send_message(chat_id, f"✅ Added: {display}")
 
 
 def _url_worker(cmd: list[str]):

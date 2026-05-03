@@ -14,12 +14,9 @@ const api = () => window.pywebview?.api;
 
 export function TitleBar() {
   return (
-    <div
-      className="flex items-center h-8 shrink-0 bg-panel border-b border-border select-none"
-      onMouseDown={() => api()?.start_drag()}
-    >
+    <div className="flex items-center h-8 shrink-0 bg-panel border-b border-border select-none">
       <span className="px-3 text-xs text-dim font-semibold tracking-wide">Archiver</span>
-      <div className="ml-auto flex" onMouseDown={e => e.stopPropagation()}>
+      <div className="ml-auto flex">
         <button
           className="w-10 h-8 flex items-center justify-center text-dim hover:bg-hover hover:text-text"
           onClick={() => api()?.minimize_window()}

@@ -71,7 +71,9 @@ _SUBCLASSPROC = ctypes.WINFUNCTYPE(
 )
 _subclass_cb: "_SUBCLASSPROC | None" = None  # kept alive to prevent GC
 
-_BORDER = 6  # resize grip width in pixels
+_BORDER      = 6   # resize grip width in pixels
+_TITLE_H     = 32  # h-8 Tailwind title bar height (px)
+_WINCTRLS_W  = 120 # 3 × w-10 window-control buttons (px)
 
 
 def _is_maximized() -> bool:
@@ -113,6 +115,9 @@ def _install_subclass(hwnd: int) -> None:
             if on_r: return 11  # HTRIGHT
             if on_t: return 12  # HTTOP
             if on_b: return 15  # HTBOTTOM
+            # Title bar drag strip (exclude window-control button zone on right)
+            if y - rc.top < _TITLE_H and rc.right - x > _WINCTRLS_W:
+                return 2  # HTCAPTION — OS handles drag; double-click maximises
             return 1  # HTCLIENT
 
         if msg == 0x0024:  # WM_GETMINMAXINFO — respect taskbar on maximize

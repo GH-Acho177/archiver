@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  addCreator, addEntry, assignEntry, getAccounts,
+  addCreator, addEntryFromLink, assignEntry, getAccounts,
   removeCreator, removeEntry, renameCreator,
   avatarUrl, fetchAvatar,
   getPosts, startCheck, getCheckStatus, openFile,
@@ -400,32 +400,28 @@ function CreatorGroup({
 }
 
 // ── Add Entry modal ───────────────────────────────────────────────────────────
-const PLATFORMS = ["x", "douyin", "bilibili"] as const;
 
 function AddEntryModal({
-  creators, onAdd, onClose,
-}: { creators: Creator[]; onAdd: () => void; onClose: () => void }) {
+  onAdd, onClose,
+}: { onAdd: () => void; onClose: () => void }) {
   const { t } = useLang();
-  const [platform, setPlatform]   = useState<string>("x");
-  const [handle, setHandle]       = useState("");
-  const [creatorId, setCreatorId] = useState<string>("");
-  const [error, setError]         = useState("");
-
-  const hints: Record<string, string> = {
-    x:        t("entry.hint.x"),
-    douyin:   t("entry.hint.douyin"),
-    bilibili: t("entry.hint.bilibili"),
-  };
+  const [url, setUrl]     = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy]   = useState(false);
 
   const submit = async () => {
-    const h = handle.trim();
-    if (!h) { setError(t("entry.required")); return; }
+    const u = url.trim();
+    if (!u) { setError(t("entry.required")); return; }
+    setBusy(true);
+    setError("");
     try {
-      await addEntry(platform, h, creatorId || null);
+      await addEntryFromLink(u);
       onAdd();
       onClose();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -434,36 +430,16 @@ function AddEntryModal({
       <div className="bg-panel border border-border rounded-lg w-96 p-5 shadow-xl">
         <h2 className="font-semibold text-text mb-4">{t("entry.title")}</h2>
 
-        <label className="block text-xs text-dim mb-1">{t("entry.platform")}</label>
-        <div className="flex gap-1 mb-4">
-          {PLATFORMS.map(p => (
-            <button key={p} onClick={() => setPlatform(p)}
-              className={`flex-1 py-1.5 rounded text-xs transition-colors ${
-                platform === p ? "bg-accent text-white" : "bg-bg border border-border text-dim hover:bg-hover"
-              }`}>
-              {PLATFORM_META[p]?.label ?? p}
-            </button>
-          ))}
-        </div>
-
         <label className="block text-xs text-dim mb-1">{t("entry.handle")}</label>
         <input
           autoFocus
-          value={handle}
-          onChange={e => setHandle(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && submit()}
-          placeholder={hints[platform]}
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && !busy && submit()}
+          placeholder={t("entry.link_hint")}
           className="w-full px-3 py-1.5 rounded bg-bg border border-border text-text text-sm
                      placeholder:text-dim focus:outline-none focus:border-accent mb-4"
         />
-
-        <label className="block text-xs text-dim mb-1">{t("entry.group")}</label>
-        <select value={creatorId} onChange={e => setCreatorId(e.target.value)}
-          className="w-full px-3 py-1.5 rounded bg-bg border border-border text-text text-sm
-                     focus:outline-none focus:border-accent mb-4">
-          <option value="">{t("entry.unassigned")}</option>
-          {creators.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
 
         {error && <p className="text-red-400 text-xs mb-3">{error}</p>}
 
@@ -472,9 +448,9 @@ function AddEntryModal({
             className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors">
             {t("cancel")}
           </button>
-          <button onClick={submit}
-            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity">
-            {t("entry.add")}
+          <button onClick={submit} disabled={busy}
+            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+            {busy ? "…" : t("entry.add")}
           </button>
         </div>
       </div>
@@ -569,7 +545,7 @@ export default function Accounts({ active }: { active: boolean }) {
       </div>
 
       {showAdd && (
-        <AddEntryModal creators={data.creators} onAdd={refresh} onClose={() => setShowAdd(false)} />
+        <AddEntryModal onAdd={refresh} onClose={() => setShowAdd(false)} />
       )}
     </div>
   );

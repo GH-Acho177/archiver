@@ -89,6 +89,9 @@ export const stopSync     = () => request("/api/stop", { method: "POST" });
 export const getAccounts  = () => request<AccountsData>("/api/accounts");
 export const addEntry     = (platform: string, handle: string, creator_id?: string | null) =>
   request<Entry>("/api/accounts/entries", json({ platform, handle, creator_id }));
+export const addEntryFromLink = (url: string) =>
+  request<{ id: string; platform: string; handle: string; display: string }>(
+    "/api/accounts/add_link", json({ url }));
 export const removeEntry  = (id: string) =>
   request<void>(`/api/accounts/entries/${id}`, { method: "DELETE" });
 export const assignEntry  = (id: string, creator_id: string | null) =>

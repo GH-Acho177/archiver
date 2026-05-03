@@ -2,7 +2,7 @@
 
 **Batch-download and archive media from X (Twitter), Douyin, and Bilibili — on Windows.**
 
-[![Version](https://img.shields.io/badge/version-5.0.2-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
+[![Version](https://img.shields.io/badge/version-5.0.4-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -201,6 +201,18 @@ packaging/
 ---
 
 ## Changelog
+
+### v5.0.4
+- Telegram bot: send a Douyin/Bilibili/X **profile link** to add it as a tracked account; bot fetches display name automatically and prompts for group assignment
+- Telegram bot: replying **0** to the group prompt creates a new group named after the account
+- Add account UI: replaced platform/handle/group form with a single profile-link input — platform and display name are auto-detected
+- Bilibili: fetch display name via public API when adding accounts
+- Window drag restricted to title bar only (OS-level HTCAPTION hit-test; no JS required)
+
+### v5.0.3
+- Simple log mode: drops all download tool output — only creator headers, errors, warnings, and corrupt notices remain
+- Full log mode: collapse carriage-return progress lines so each file shows one clean final state instead of stacked percentage lines
+- Fix `sleep_req` NameError (was read in caller scope, moved into `_run_handle`)
 
 ### v5.0.2
 - Wire `sleep_req` setting into Douyin (f2) page fetches — defaults to 1s between API pages to avoid rate limiting
