@@ -130,6 +130,8 @@ export const deleteDownload = (path: string) =>
   request<void>(`/api/downloads/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
 export const openFile = (path: string) =>
   request<{ ok: boolean }>(`/api/files/open?path=${encodeURIComponent(path)}`, { method: "POST" });
+export const redownloadFile = (platform: string, path?: string, postId?: string) =>
+  request<{ ok: boolean }>("/api/files/redownload", json({ platform, path, post_id: postId }));
 export const openDownloadsFolder = () =>
   request<{ ok: boolean }>("/api/downloads/open", { method: "POST" });
 export const browseFolder = () =>

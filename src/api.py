@@ -1133,6 +1133,62 @@ def delete_download_file(path: str):
         p.unlink()
 
 
+class RedownloadRequest(BaseModel):
+    platform: str
+    path:     Optional[str] = None
+    post_id:  Optional[str] = None
+
+
+@app.post("/api/files/redownload")
+def redownload_file(req: RedownloadRequest):
+    platform = req.platform
+    if platform not in PLATFORMS:
+        raise HTTPException(400, f"Unknown platform: {platform}")
+
+    post_id = req.post_id
+
+    if not post_id and req.path:
+        f = Path(req.path)
+        resolved = str(f.resolve())
+        idx = _load_post_index()
+        for acc_data in idx.get(platform, {}).values():
+            for pid, meta in acc_data.items():
+                if pid.startswith("_"):
+                    continue
+                if meta.get("file") == resolved:
+                    post_id = pid
+                    break
+            if post_id:
+                break
+        if not post_id:
+            result = _extract_post_id_and_date(platform, f)
+            if result:
+                post_id = result[0]
+
+    if not post_id:
+        raise HTTPException(400, "Could not determine post ID for this file")
+
+    # Delete the existing file so the downloader doesn't skip it
+    if req.path:
+        try:
+            p = Path(req.path)
+            if p.exists() and p.is_file():
+                p.unlink()
+        except Exception:
+            pass
+
+    if platform == "x":
+        url = f"https://x.com/i/status/{post_id}"
+    elif platform == "bilibili":
+        url = f"https://www.bilibili.com/video/{post_id}"
+    elif platform == "douyin":
+        url = f"https://www.douyin.com/video/{post_id}"
+    else:
+        raise HTTPException(400, f"Redownload not supported for {platform}")
+
+    return download_url(DownloadUrlRequest(url=url))
+
+
 # ── Telegram bot ──────────────────────────────────────────────────────────────
 
 @app.get("/api/telegram/status")

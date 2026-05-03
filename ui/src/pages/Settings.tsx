@@ -33,20 +33,6 @@ function NumInput({
   );
 }
 
-function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  return (
-    <button
-      onClick={onToggle}
-      className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${on ? "bg-accent" : "bg-border"}`}
-    >
-      <span
-        className={`absolute left-0 top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          on ? "translate-x-[22px]" : "translate-x-0.5"
-        }`}
-      />
-    </button>
-  );
-}
 
 export default function Settings({ active }: { active: boolean }) {
   const { t, lang, setLang, theme, setTheme } = useLang();
@@ -192,22 +178,17 @@ export default function Settings({ active }: { active: boolean }) {
           <h2 className="text-sm font-semibold text-text mb-3">{t("set.auto_sync")}</h2>
           <div className="bg-panel border border-border rounded-md p-4 space-y-4">
             <Field label={t("set.enable_sync")}>
-              <Toggle
-                on={!!cfg.auto_update_enabled}
-                onToggle={() => {
-                  const next = !cfg.auto_update_enabled;
-                  set("auto_update_enabled", next);
-                  saveSettings({ auto_update_enabled: next }).catch(() => {});
-                }}
-              />
+              <button
+                onClick={() => set("auto_update_enabled", !cfg.auto_update_enabled)}
+                className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${cfg.auto_update_enabled ? "bg-accent" : "bg-border"}`}
+              >
+                <span className={`absolute left-0 top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${cfg.auto_update_enabled ? "translate-x-[22px]" : "translate-x-0.5"}`} />
+              </button>
             </Field>
             {cfg.auto_update_enabled && (
               <Field label={t("set.interval")}>
                 <NumInput value={cfg.auto_update_interval ?? 60} min={1}
-                  onChange={v => {
-                    set("auto_update_interval", v);
-                    saveSettings({ auto_update_interval: v }).catch(() => {});
-                  }} />
+                  onChange={v => set("auto_update_interval", v)} />
               </Field>
             )}
           </div>

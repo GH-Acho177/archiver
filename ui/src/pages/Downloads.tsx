@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { listDownloads, deleteDownload, openDownloadsFolder, PLATFORM_META, type DownloadFile } from "../api";
+import { listDownloads, deleteDownload, openDownloadsFolder, openFile, redownloadFile, PLATFORM_META, type DownloadFile } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
+import { ContextMenu } from "../components/ContextMenu";
 import { useLang } from "../i18n";
 
 const PLAT_FILTER = ["all", "x", "douyin", "bilibili", "—"] as const;
@@ -19,6 +20,7 @@ export default function Downloads({ active }: { active: boolean }) {
   const [deleting, setDeleting]   = useState<string | null>(null);
   const [confirm, setConfirm]     = useState<DownloadFile | null>(null);
   const [search, setSearch]       = useState("");
+  const [menu, setMenu]           = useState<{x:number; y:number; file:DownloadFile} | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -122,7 +124,9 @@ export default function Downloads({ active }: { active: boolean }) {
               {visible.map(f => (
                 <tr
                   key={f.path}
-                  className="border-b border-border/40 hover:bg-hover transition-colors group"
+                  onDoubleClick={() => openFile(f.path).catch(() => {})}
+                  onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, file: f }); }}
+                  className="border-b border-border/40 hover:bg-hover transition-colors group cursor-pointer"
                 >
                   <td className="px-4 py-2">
                     <PlatformChip platform={f.platform} />
@@ -151,6 +155,17 @@ export default function Downloads({ active }: { active: boolean }) {
           </table>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x} y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            { label: t("ctx.open"),       onClick: () => openFile(menu.file.path).catch(() => {}) },
+            { label: t("ctx.redownload"), onClick: () => redownloadFile(menu.file.platform, menu.file.path).catch(() => {}) },
+          ]}
+        />
+      )}
 
       {/* Delete confirmation */}
       {confirm && (

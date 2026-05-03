@@ -1,7 +1,6 @@
 declare global {
   interface Window {
     pywebview?: { api: {
-      start_drag(): void;
       minimize_window(): void;
       toggle_maximize(): void;
       close_window(): void;
@@ -14,9 +13,12 @@ const api = () => window.pywebview?.api;
 
 export function TitleBar() {
   return (
-    <div className="flex items-center h-8 shrink-0 bg-panel border-b border-border select-none">
+    <div className="pywebview-drag-region flex items-center h-8 shrink-0 bg-panel border-b border-border select-none">
       <span className="px-3 text-xs text-dim font-semibold tracking-wide">Archiver</span>
-      <div className="ml-auto flex">
+      <div
+        className="ml-auto flex"
+        onMouseDown={e => e.stopPropagation()}
+      >
         <button
           className="w-10 h-8 flex items-center justify-center text-dim hover:bg-hover hover:text-text"
           onClick={() => api()?.minimize_window()}

@@ -115,10 +115,7 @@ def _install_subclass(hwnd: int) -> None:
             if on_r: return 11  # HTRIGHT
             if on_t: return 12  # HTTOP
             if on_b: return 15  # HTBOTTOM
-            # Title bar drag strip (exclude window-control button zone on right)
-            if y - rc.top < _TITLE_H and rc.right - x > _WINCTRLS_W:
-                return 2  # HTCAPTION — OS handles drag; double-click maximises
-            return 1  # HTCLIENT
+            return 1  # HTCLIENT — JS handles title-bar drag via start_drag()
 
         if msg == 0x0024:  # WM_GETMINMAXINFO — respect taskbar on maximize
             rc = ctypes.wintypes.RECT()
@@ -327,7 +324,7 @@ if __name__ == "__main__":
 
     _window = webview.create_window(
         "Archiver", _prepare_index(), width=1100, height=720, min_size=(800, 560),
-        frameless=True, js_api=JsApi(), background_color="#2b2b2b",
+        frameless=True, easy_drag=False, js_api=JsApi(), background_color="#2b2b2b",
     )
     _window.events.loaded += _apply_thick_frame
     webview.start(_on_started, http_server=True)

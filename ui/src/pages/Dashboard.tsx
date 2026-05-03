@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { getStatus, startSync, stopSync, downloadUrl, getSettings, saveSettings, getHistory, getAccounts, openDownloadsFolder, openFile, avatarUrl, fetchAvatar, type Status, type HistoryEntry, type HistoryUser, type AccountsData } from "../api";
+﻿import { useEffect, useRef, useState, useCallback } from "react";
+import { getStatus, startSync, stopSync, downloadUrl, getSettings, saveSettings, getHistory, getAccounts, openDownloadsFolder, openFile, redownloadFile, avatarUrl, fetchAvatar, type Status, type HistoryEntry, type HistoryUser, type AccountsData } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
+import { ContextMenu } from "../components/ContextMenu";
 import { useLang } from "../i18n";
 
 function DownloadModal({ onClose }: { onClose: () => void }) {
@@ -65,37 +66,15 @@ function classifyLine(line: string): string {
 
 function simplifyLines(lines: string[]): string[] {
   const out: string[] = [];
-  let pendingDest: string | null = null;
-
   for (const line of lines) {
-    // Track download destination (non-fragment files)
-    const destMatch = line.match(/^\[download\] Destination:\s*(.+)/);
-    if (destMatch) {
-      const dest = destMatch[1].trim();
-      pendingDest = /\.f\d+\.(mp4|m4a|webm|ts)$/.test(dest)
-        ? null
-        : dest.replace(/.*[/\\]/, "");
-      continue;
-    }
-
-    // Collapse 100% completion into one clean line
-    const doneMatch = line.match(/^\[download\]\s+100% of\s+([\d.]+\s*\w+)/);
-    if (doneMatch) {
-      if (pendingDest) out.push(`  ↓ ${pendingDest}  (${doneMatch[1].replace(/\s+/, " ")})`);
-      pendingDest = null;
-      continue;
-    }
-
-    // Drop all remaining [download] lines (progress, resume, playlist, etc.)
     if (/^\[download\]/.test(line)) continue;
-
-    // Drop yt-dlp / gallery-dl noise
     if (/^\[Merger\]|^\[Fixup|^Deleting original file/.test(line)) continue;
-    if (/Format\(s\).+missing/.test(line)) continue;
-    if (/^\[(BiliBili|BilibiliSpaceVideo|youtube|Twitter|twitch|TikTok)\].+(Extracting|Downloading|Parsing|Anthology|Chapter|Wbi|Space|Webpage|Playlist)/i.test(line)) continue;
+    if (/^\[(BiliBili|BilibiliSpaceVideo|youtube|Twitter|twitch|TikTok)\]/i.test(line)) continue;
     if (/has already been downloaded/.test(line)) continue;
     if (/^\[info\]/.test(line)) continue;
-
+    if (/Format\(s\).+missing/.test(line)) continue;
+    if (/[█░▓]{2,}/.test(line)) continue;
+    if (/\d+%\|/.test(line)) continue;
     out.push(line);
   }
   return out;
@@ -220,7 +199,9 @@ function HistoryAvatar({ platform, handle }: { platform: string; handle?: string
 }
 
 function UserRow({ user }: { user: HistoryUser }) {
+  const { t } = useLang();
   const [open, setOpen] = useState(false);
+  const [menu, setMenu] = useState<{x:number; y:number; path:string} | null>(null);
   return (
     <div className="border-t border-border/50 first:border-t-0">
       <button
@@ -243,13 +224,27 @@ function UserRow({ user }: { user: HistoryUser }) {
       </button>
       {open && (
         <div className="px-4 pb-2 space-y-0.5">
-          {user.files.map((f, i) => (
-            <div key={i}
-              onDoubleClick={() => openFile(user.folder + "\\" + f)}
-              className="font-mono text-xs text-dim truncate pl-8 rounded px-1 cursor-pointer hover:text-text hover:bg-hover transition-colors"
-            >{f}</div>
-          ))}
+          {user.files.map((f, i) => {
+            const path = user.folder + "\\" + f;
+            return (
+              <div key={i}
+                onDoubleClick={() => openFile(path).catch(() => {})}
+                onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, path }); }}
+                className="font-mono text-xs text-dim truncate pl-8 rounded px-1 cursor-pointer hover:text-text hover:bg-hover transition-colors"
+              >{f}</div>
+            );
+          })}
         </div>
+      )}
+      {menu && (
+        <ContextMenu
+          x={menu.x} y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            { label: t("ctx.open"),       onClick: () => openFile(menu.path).catch(() => {}) },
+            { label: t("ctx.redownload"), onClick: () => redownloadFile(user.platform, menu.path).catch(() => {}) },
+          ]}
+        />
       )}
     </div>
   );

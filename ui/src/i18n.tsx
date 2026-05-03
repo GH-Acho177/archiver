@@ -73,6 +73,8 @@ const STRINGS = {
     "acc.no_entries":   "No entries — assign one here",
 
     // Context menu
+    "ctx.open":         "Open",
+    "ctx.redownload":   "Redownload",
     "ctx.posts":        "Posts / Ghost check",
     "ctx.move_to":      "Move to…",
     "ctx.remove_acc":   "Remove account",
@@ -239,6 +241,8 @@ const STRINGS = {
     "acc.no_entries":  "暂无账号 — 在此分配",
 
     // Context menu
+    "ctx.open":         "打开",
+    "ctx.redownload":   "重新下载",
     "ctx.posts":        "帖子 / 幽灵检测",
     "ctx.move_to":      "移动到…",
     "ctx.remove_acc":   "删除账号",

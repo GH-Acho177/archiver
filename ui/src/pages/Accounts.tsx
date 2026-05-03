@@ -3,11 +3,12 @@ import {
   addCreator, addEntryFromLink, assignEntry, getAccounts,
   removeCreator, removeEntry, renameCreator,
   avatarUrl, fetchAvatar,
-  getPosts, startCheck, getCheckStatus, openFile,
+  getPosts, startCheck, getCheckStatus, openFile, redownloadFile,
   PLATFORM_META, type AccountsData, type Creator, type Entry,
   type PostEntry, type CheckStatus,
 } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
+import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { useLang } from "../i18n";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -58,6 +59,7 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
   const [loading, setLoading]   = useState(true);
   const [job, setJob]           = useState<CheckStatus>({ running: false, done: 0, total: 0 });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [rowMenu, setRowMenu]   = useState<{x:number; y:number; p:PostEntry} | null>(null);
 
   const loadPosts = useCallback(() => {
     getPosts(entry.platform, aid).then(setPosts).catch(() => {}).finally(() => setLoading(false));
@@ -145,8 +147,9 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
               <tbody>
                 {posts.map(p => (
                   <tr key={p.post_id}
-                    onDoubleClick={() => p.file && openFile(p.file)}
-                    className={`border-b border-border/30 transition-colors ${p.status === "gone" ? "bg-red-900/10 hover:bg-red-900/20" : "hover:bg-hover"} ${p.file ? "cursor-pointer" : ""}`}
+                    onDoubleClick={() => p.file && openFile(p.file).catch(() => {})}
+                    onContextMenu={e => { e.preventDefault(); setRowMenu({ x: e.clientX, y: e.clientY, p }); }}
+                    className={`border-b border-border/30 transition-colors cursor-pointer ${p.status === "gone" ? "bg-red-900/10 hover:bg-red-900/20" : "hover:bg-hover"}`}
                   >
                     <td className="px-4 py-1.5 text-dim font-mono whitespace-nowrap">{p.date || "—"}</td>
                     <td className="px-4 py-1.5">
@@ -190,85 +193,21 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
           </button>
         </div>
       </div>
+      {rowMenu && (
+        <ContextMenu
+          x={rowMenu.x} y={rowMenu.y}
+          onClose={() => setRowMenu(null)}
+          items={[
+            ...(rowMenu.p.file ? [{ label: t("ctx.open"), onClick: () => openFile(rowMenu.p.file).catch(() => {}) }] : []),
+            { label: t("ctx.redownload"), onClick: () => redownloadFile(entry.platform, rowMenu.p.file || undefined, rowMenu.p.post_id).catch(() => {}) },
+          ]}
+        />
+      )}
     </div>
   );
 }
 
 // ── Context menu ──────────────────────────────────────────────────────────────
-interface MenuItem {
-  label: string;
-  danger?: boolean;
-  divider?: boolean;
-  submenu?: MenuItem[];
-  onClick: () => void;
-}
-
-function ContextMenu({
-  items, onClose, x, y,
-}: { items: MenuItem[]; onClose: () => void; x?: number; y?: number }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [subIdx, setSubIdx] = useState<number | null>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [onClose]);
-
-  const fixed = x !== undefined && y !== undefined;
-  const cls = fixed
-    ? "fixed z-50 w-52 rounded border border-border bg-panel shadow-xl py-1"
-    : "absolute z-50 right-0 top-6 w-52 rounded border border-border bg-panel shadow-xl py-1";
-  const style = fixed ? { left: x, top: y } : undefined;
-
-  return (
-    <div ref={ref} className={cls} style={style}>
-      {items.map((item, i) =>
-        item.divider ? (
-          <div key={i} className="border-t border-border my-1" />
-        ) : item.submenu ? (
-          <div
-            key={i}
-            className="relative"
-            onMouseEnter={() => setSubIdx(i)}
-            onMouseLeave={() => setSubIdx(null)}
-          >
-            <button className={`w-full text-left px-3 py-1.5 text-xs hover:bg-hover transition-colors flex items-center justify-between ${item.danger ? "text-red-400" : "text-text"}`}>
-              {item.label}
-              <span className="text-dim text-[10px] ml-2">▶</span>
-            </button>
-            {subIdx === i && (
-              <div className="absolute left-full top-0 w-52 rounded border border-border bg-panel shadow-xl py-1 z-50">
-                {item.submenu.map((sub, j) =>
-                  sub.divider ? (
-                    <div key={j} className="border-t border-border my-1" />
-                  ) : (
-                    <button key={j}
-                      onClick={() => { sub.onClick(); onClose(); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-hover transition-colors ${sub.danger ? "text-red-400" : "text-text"}`}>
-                      {sub.label}
-                    </button>
-                  )
-                )}
-              </div>
-            )}
-          </div>
-        ) : (
-          <button key={i}
-            onClick={() => { item.onClick(); onClose(); }}
-            onMouseEnter={() => setSubIdx(null)}
-            className={`w-full text-left px-3 py-1.5 text-xs hover:bg-hover transition-colors ${
-              item.danger ? "text-red-400" : "text-text"
-            }`}>
-            {item.label}
-          </button>
-        )
-      )}
-    </div>
-  );
-}
 
 // ── Entry row ─────────────────────────────────────────────────────────────────
 function EntryRow({
