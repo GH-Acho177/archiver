@@ -35,6 +35,17 @@ PLATFORMS = {
         "downloader":   "yt-dlp",
         "entry_format": "name|id",
     },
+    "xiaohongshu": {
+        "label":        "小红书",
+        "icon":         "RED",
+        "color":        "#ff2442",
+        "icon_bg":      "#ffffff",
+        "users_file":   "config/xiaohongshu_users.txt",
+        "cookies_file": "config/xiaohongshu_cookies.txt",
+        "url_fn":       lambda u: f"https://www.xiaohongshu.com/user/profile/{u.split('|')[-1]}",
+        "downloader":   "xiaohongshu",
+        "entry_format": "name|id",
+    },
 }
 
 GDL                 = "gallery-dl"
@@ -73,7 +84,7 @@ STRINGS = {
         "card.active":    "Active",
         "card.platforms": "Platforms",
         # Downloads panel
-        "dl.input_hint":  "Paste a URL from X, Bilibili, or Douyin",
+        "dl.input_hint":  "Paste a URL from X, Bilibili, Douyin, or Xiaohongshu",
         "dl.new":         "⬇  Download URL",
         "dl.open_folder": "📁  Open Folder",
         "dl.refresh":     "↻  Refresh",
@@ -149,7 +160,7 @@ STRINGS = {
         "card.active":    "进行中",
         "card.platforms": "已连接平台",
         # Downloads panel
-        "dl.input_hint":  "粘贴 X、B站或抖音的链接",
+        "dl.input_hint":  "粘贴 X、B站、抖音或小红书的链接",
         "dl.new":         "⬇  下载链接",
         "dl.open_folder": "📁  打开目录",
         "dl.refresh":     "↻  刷新",

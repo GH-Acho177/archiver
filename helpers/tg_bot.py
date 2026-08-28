@@ -2,6 +2,7 @@
 Minimal Telegram bot using long-polling — stdlib only, no third-party packages.
 """
 import json
+import ssl
 import threading
 import time
 import urllib.error
@@ -26,6 +27,13 @@ class TelegramBot:
         self._on_log     = on_log   # on_log(text) — optional, called from bg thread
         self._stop       = threading.Event()
         self._thread: "threading.Thread | None" = None
+        try:
+            # Use the Windows certificate store. This supports corporate/local
+            # root certificates that Python's bundled CA set may not know.
+            import truststore
+            self._ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        except ImportError:
+            self._ssl_context = ssl.create_default_context()
 
     def _log(self, text: str):
         if self._on_log:
@@ -49,6 +57,20 @@ class TelegramBot:
         try:
             info = self._request("getMe")
             name = info.get("result", {}).get("username", "?")
+            try:
+                self._request(
+                    "setMyCommands",
+                    commands=[
+                        {"command": "status", "description": "Show sync status"},
+                        {"command": "sync", "description": "Start an Update or Full sync"},
+                        {"command": "stopsync", "description": "Stop the current sync"},
+                        {"command": "accounts", "description": "List tracked accounts"},
+                        {"command": "deleteaccount", "description": "Delete a tracked account"},
+                        {"command": "cancel", "description": "Cancel a pending action"},
+                    ],
+                )
+            except Exception as exc:
+                self._log(f"[Bot] Could not update command menu: {exc}\n")
             self._log(f"[Bot] Connected as @{name} — ready\n")
         except Exception as exc:
             self._log(f"[Bot] getMe failed: {exc}\n")
@@ -77,7 +99,9 @@ class TelegramBot:
             url, data=body,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=35) as resp:
+        with urllib.request.urlopen(
+            req, timeout=35, context=self._ssl_context
+        ) as resp:
             return json.loads(resp.read())
 
     def _poll_loop(self):
@@ -109,7 +133,16 @@ class TelegramBot:
 
     def _dispatch(self, update: dict):
         msg     = update.get("message", {})
-        text    = msg.get("text", "").strip()
+        text    = (msg.get("text") or msg.get("caption") or "").strip()
+        # A clickable Telegram text link can keep its URL only in the entity.
+        entities = msg.get("entities") or msg.get("caption_entities") or []
+        entity_urls = [
+            entity.get("url", "").strip()
+            for entity in entities
+            if entity.get("type") == "text_link" and entity.get("url")
+        ]
+        if entity_urls:
+            text = " ".join([text, *entity_urls]).strip()
         chat_id = msg.get("chat", {}).get("id")
         user_id = msg.get("from", {}).get("id")
         if text and chat_id and user_id:

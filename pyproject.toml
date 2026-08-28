@@ -1,0 +1,22 @@
+[project]
+name = "archiver"
+version = "5.0.5"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiofiles>=24.1",
+    "aiohttp>=3.10",
+    "certifi>=2025.1",
+    "f2==0.0.1.7",
+    "fastapi>=0.115,<0.116",
+    "pillow>=11",
+    "pydantic==2.9.2",
+    "pystray>=0.19.5",
+    "pywebview>=5",
+    "truststore>=0.10",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12,<16",
+    "xiaohongshu-cli==0.6.4",
+]
+
+[dependency-groups]
+dev = ["pyinstaller>=6.10"]

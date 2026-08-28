@@ -13,7 +13,7 @@ async def download_one(
     aweme_id: str,
     cookie: str,
     outdir: str,
-    naming: str = "{nickname}_{create}_{aweme_id}",
+    naming: str = "{nickname}_{create:.10}_{aweme_id}_{desc:.60}",
 ) -> None:
     from f2.apps.douyin.utils import ClientConfManager
     from f2.apps.douyin import utils as dy_utils
@@ -30,6 +30,7 @@ async def download_one(
         "url":             f"https://www.douyin.com/video/{aweme_id}",
         "path":            outdir,
         "naming":          naming,
+        "interval":        "all",
         "languages":       "en_US",
         "timeout":         30,
         "max_retries":     3,
@@ -44,19 +45,26 @@ async def download_one(
     }
 
     handler = DouyinHandler(kwargs)
+    # Archiver owns its UI and Telegram notifications. F2's optional Bark
+    # notifier otherwise makes an unrelated api.day.app request per post and
+    # prints a scary error even when the media download succeeds.
+    handler.enable_bark = False
 
-    aweme_data = await handler.fetch_one_video(aweme_id)
-    user_path = Path(outdir)
-    user_path.mkdir(parents=True, exist_ok=True)
-    data = aweme_data._to_dict()
-    if isinstance(data, dict):
-        if not data.get("nickname"):
-            data["nickname"] = "unknown"
-        if not data.get("create"):
-            data["create"] = aweme_id
-    await handler.downloader.create_download_tasks(
-        kwargs, data, user_path
-    )
+    try:
+        aweme_data = await handler.fetch_one_video(aweme_id)
+        user_path = Path(outdir)
+        user_path.mkdir(parents=True, exist_ok=True)
+        data = aweme_data._to_dict()
+        if isinstance(data, dict):
+            if not data.get("nickname"):
+                data["nickname"] = "unknown"
+            if not data.get("create"):
+                data["create"] = aweme_id
+        await handler.downloader.create_download_tasks(
+            kwargs, data, user_path
+        )
+    finally:
+        await handler.downloader.close()
 
 
 async def main() -> None:
@@ -67,7 +75,8 @@ async def main() -> None:
     aweme_id = sys.argv[1]
     cookie   = sys.argv[2]
     outdir   = sys.argv[3]
-    naming   = sys.argv[4] if len(sys.argv) > 4 else "{nickname}_{create}_{aweme_id}"
+    naming   = (sys.argv[4] if len(sys.argv) > 4
+                else "{nickname}_{create:.10}_{aweme_id}_{desc:.60}")
     await download_one(aweme_id, cookie, outdir, naming)
 
 

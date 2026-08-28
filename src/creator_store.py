@@ -1,9 +1,30 @@
 import json
+import threading
 import uuid
 from pathlib import Path
 
 CREATORS_FILE = "config/creators.json"
 UNASSIGNED_ID = "__unassigned__"  # sentinel used in creator_ids lists
+
+
+def _entry_identity(platform: str, handle: str) -> tuple[str, str]:
+    """Return the stable identity used to reject duplicate accounts."""
+    pid = platform.strip().casefold()
+    value = handle.strip()
+    if pid in {"bilibili", "douyin", "xiaohongshu"} and "|" in value:
+        value = value.rsplit("|", 1)[-1].strip()
+    if pid == "x":
+        value = value.lstrip("@").casefold()
+    return pid, value
+
+
+class DuplicateEntryError(ValueError):
+    def __init__(self, entry: "Entry"):
+        self.entry = entry
+        super().__init__(
+            f"This {entry.platform} account has already been added: "
+            f"{entry.handle.split('|')[0]}"
+        )
 
 
 class Entry:
@@ -30,6 +51,7 @@ class CreatorStore:
         self._path     = Path(path)
         self._creators: list[Creator] = []
         self._entries:  list[Entry]   = []
+        self._entry_lock = threading.RLock()
         self.load()
 
     # ── Persistence ────────────────────────────────────────────────────────────
@@ -47,6 +69,10 @@ class CreatorStore:
                 Entry(d["id"], d["platform"], d["handle"], d.get("creator_id"))
                 for d in data.get("entries", [])
             ]
+            before = len(self._creators)
+            self._prune_empty_creators()
+            if len(self._creators) != before:
+                self.save()
         except Exception:
             pass
 
@@ -86,6 +112,14 @@ class CreatorStore:
                 return e
         return None
 
+    def find_entry(self, platform: str, handle: str) -> "Entry | None":
+        identity = _entry_identity(platform, handle)
+        with self._entry_lock:
+            for entry in self._entries:
+                if _entry_identity(entry.platform, entry.handle) == identity:
+                    return entry
+        return None
+
     def get_entries_for_creator(self, creator_id: str) -> list[Entry]:
         return [e for e in self._entries if e.creator_id == creator_id]
 
@@ -96,13 +130,20 @@ class CreatorStore:
         return [e for e in self._entries if e.platform == platform]
 
     def get_entries_for_download(self, platform: str,
-                                 creator_ids: "list[str] | None" = None) -> "list[Entry]":
+                                 creator_ids: "list[str] | None" = None,
+                                 entry_ids: "list[str] | None" = None) -> "list[Entry]":
         """Entries for the download worker.
 
         creator_ids=None → all entries for the platform.
         Otherwise only entries whose creator_id is in the list (UNASSIGNED_ID
         matches entries with creator_id=None).
         """
+        if entry_ids is not None:
+            wanted = set(entry_ids)
+            return [
+                e for e in self._entries
+                if e.platform == platform and e.id in wanted
+            ]
         if creator_ids is None:
             return [e for e in self._entries if e.platform == platform]
         selected: list[Entry] = []
@@ -141,10 +182,14 @@ class CreatorStore:
 
     def add_entry(self, platform: str, handle: str,
                   creator_id: "str | None" = None) -> Entry:
-        e = Entry(_short_id(), platform, handle, creator_id)
-        self._entries.append(e)
-        self.save()
-        return e
+        with self._entry_lock:
+            existing = self.find_entry(platform, handle)
+            if existing is not None:
+                raise DuplicateEntryError(existing)
+            e = Entry(_short_id(), platform, handle, creator_id)
+            self._entries.append(e)
+            self.save()
+            return e
 
     def remove_entry(self, entry_id: str) -> None:
         self._entries = [e for e in self._entries if e.id != entry_id]
