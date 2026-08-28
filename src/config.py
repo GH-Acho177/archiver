@@ -1,5 +1,12 @@
+from src.config_root import CONFIG_DIR
+
+
+def _config_file(name: str) -> str:
+    return str(CONFIG_DIR / name)
+
+
 APP_VERSION = "5.0.5"
-POST_INDEX_FILE = "config/post_index.json"
+POST_INDEX_FILE = _config_file("post_index.json")
 
 # ── Platform config ────────────────────────────────────────────────────────────
 PLATFORMS = {
@@ -7,8 +14,8 @@ PLATFORMS = {
         "label":        "X (Twitter)",
         "icon":         "𝕏",
         "color":        "#1d9bf0",
-        "users_file":   "config/x_users.txt",
-        "cookies_file": "config/x_cookies.txt",
+        "users_file":   _config_file("x_users.txt"),
+        "cookies_file": _config_file("x_cookies.txt"),
         "url_fn":       lambda u: f"https://x.com/{u.split('|')[-1]}/media",
         "downloader":   "gallery-dl",
         "entry_format": "id",
@@ -18,8 +25,8 @@ PLATFORMS = {
         "icon":         "抖",
         "color":        "#fe2c55",
         "icon_bg":      "#000000",
-        "users_file":   "config/douyin_users.txt",
-        "cookies_file": "config/douyin_cookies.txt",
+        "users_file":   _config_file("douyin_users.txt"),
+        "cookies_file": _config_file("douyin_cookies.txt"),
         "url_fn":       lambda u: f"https://www.douyin.com/user/{u.split('|')[-1]}",
         "downloader":   "f2",
         "entry_format": "name|id",
@@ -29,8 +36,8 @@ PLATFORMS = {
         "icon":         "哔",
         "color":        "#fb7299",
         "icon_bg":      "#ffffff",
-        "users_file":   "config/bilibili_users.txt",
-        "cookies_file": "config/bilibili_cookies.txt",
+        "users_file":   _config_file("bilibili_users.txt"),
+        "cookies_file": _config_file("bilibili_cookies.txt"),
         "url_fn":       lambda u: f"https://space.bilibili.com/{u.split('|')[-1]}/video",
         "downloader":   "yt-dlp",
         "entry_format": "name|id",
@@ -40,8 +47,8 @@ PLATFORMS = {
         "icon":         "RED",
         "color":        "#ff2442",
         "icon_bg":      "#ffffff",
-        "users_file":   "config/xiaohongshu_users.txt",
-        "cookies_file": "config/xiaohongshu_cookies.txt",
+        "users_file":   _config_file("xiaohongshu_users.txt"),
+        "cookies_file": _config_file("xiaohongshu_cookies.txt"),
         "url_fn":       lambda u: f"https://www.xiaohongshu.com/user/profile/{u.split('|')[-1]}",
         "downloader":   "xiaohongshu",
         "entry_format": "name|id",
@@ -49,12 +56,12 @@ PLATFORMS = {
 }
 
 GDL                 = "gallery-dl"
-SETTINGS_FILE       = "config/settings.json"
-DOUYIN_LAST_RUN     = "config/douyin_last_run.json"
-UPDATE_HISTORY_FILE = "config/update_history.json"
-DOWNLOAD_PATH_FILE  = "config/download_path.txt"
-LANG_FILE           = "config/lang.txt"
-ARCHIVES_DIR        = "config/archives"
+SETTINGS_FILE       = _config_file("settings.json")
+DOUYIN_LAST_RUN     = _config_file("douyin_last_run.json")
+UPDATE_HISTORY_FILE = _config_file("update_history.json")
+DOWNLOAD_PATH_FILE  = _config_file("download_path.txt")
+LANG_FILE           = _config_file("lang.txt")
+ARCHIVES_DIR        = str(CONFIG_DIR / "archives")
 ACCENT              = "#0067c0"
 
 STRINGS = {

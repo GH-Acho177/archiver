@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import {
   getSettings, saveSettings, getCookies, saveCookies,
   getTgStatus, startTgBot, stopTgBot, resetDatabase,
-  browseFolder,
+  browseFolder, saveConfigDirectory,
   PLATFORM_META, type AppSettings, type TgStatus,
 } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
@@ -41,6 +41,8 @@ export default function Settings({ active }: { active: boolean }) {
   const [cookies, setCookies] = useState<Record<string, string>>({});
   const [saved, setSaved]     = useState(false);
   const [error, setError]     = useState("");
+  const [configDraft, setConfigDraft] = useState("");
+  const [configBusy, setConfigBusy] = useState(false);
 
   const [tg, setTg]           = useState<TgStatus>({ status: "stopped", token_set: false });
   const [tgToken, setTgToken] = useState("");
@@ -58,7 +60,10 @@ export default function Settings({ active }: { active: boolean }) {
   useEffect(() => {
     if (!active || loaded.current) return;
     loaded.current = true;
-    getSettings().then(setCfg).catch(() => {});
+    getSettings().then(settings => {
+      setCfg(settings);
+      setConfigDraft(settings.next_config_dir ?? settings.config_dir ?? "");
+    }).catch(() => {});
     Promise.all(
       COOKIE_PLATFORMS.map(p => getCookies(p).then(r => [p, r.content] as const))
     ).then(pairs => {
@@ -192,6 +197,69 @@ export default function Settings({ active }: { active: boolean }) {
                 className="h-4 w-4 accent-accent"
               />
             </label>
+          </div>
+        </section>
+
+        {/* Download location */}
+        <section>
+          <h2 className="text-sm font-semibold text-text mb-1">Configuration folder</h2>
+          <p className="mb-3 text-xs text-dim">
+            Stores accounts, cookies, archive records, avatars, and Viewer history. Each app copy can use a different folder.
+          </p>
+          <div className="rounded-md border border-border bg-panel p-4">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={configDraft}
+                onChange={event => setConfigDraft(event.target.value)}
+                className="min-w-0 flex-1 rounded border border-border bg-bg px-3 py-1.5 text-sm text-text placeholder:text-dim focus:border-accent focus:outline-none"
+                placeholder="Choose a profile folder"
+              />
+              <button
+                onClick={async () => {
+                  const result = await browseFolder().catch(() => null);
+                  if (result?.path) setConfigDraft(result.path);
+                }}
+                className="shrink-0 rounded border border-border px-3 py-1.5 text-sm text-dim transition-colors hover:border-accent hover:text-text"
+              >
+                {t("set.browse")}
+              </button>
+              <button
+                disabled={configBusy || !configDraft.trim() || configDraft.trim() === (cfg.next_config_dir ?? cfg.config_dir ?? "")}
+                onClick={async () => {
+                  setError("");
+                  setConfigBusy(true);
+                  try {
+                    const result = await saveConfigDirectory(configDraft);
+                    setConfigDraft(result.next_config_dir);
+                    setCfg(current => ({
+                      ...current,
+                      next_config_dir: result.next_config_dir,
+                      config_restart_required: result.restart_required,
+                    }));
+                  } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setConfigBusy(false);
+                  }
+                }}
+                className="shrink-0 rounded bg-accent px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {configBusy ? "Applying…" : "Use folder"}
+              </button>
+            </div>
+            <div className="mt-3 flex items-start gap-2 text-xs text-dim">
+              <span className="mt-0.5 text-accent">●</span>
+              <span>Currently using <span className="break-all font-mono text-text">{cfg.config_dir || "—"}</span></span>
+            </div>
+            {cfg.config_restart_required && (
+              <div className="mt-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                The new folder will be used after you fully quit Archiver from the tray and reopen it. Existing data is not moved automatically.
+              </div>
+            )}
+            <p className="mt-3 text-[11px] leading-relaxed text-dim">
+              For simultaneous daily and development use, choose separate folders to avoid both instances writing the same database.
+            </p>
           </div>
         </section>
 

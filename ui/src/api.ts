@@ -73,6 +73,9 @@ export interface ViewerAccount {
 }
 
 export interface AppSettings {
+  config_dir?:          string;
+  next_config_dir?:     string;
+  config_restart_required?: boolean;
   download_path?:        string;
   parallel_workers?:     number;
   per_account_workers?:  number;
@@ -160,6 +163,9 @@ export const renameCreator = (id: string, name: string) =>
 // Settings & cookies
 export const getSettings  = () => request<AppSettings>("/api/settings");
 export const saveSettings = (s: AppSettings) => request("/api/settings", put(s));
+export const saveConfigDirectory = (path: string) =>
+  request<{ ok: boolean; config_dir: string; next_config_dir: string; restart_required: boolean }>(
+    "/api/settings/config-directory", put({ path }));
 export const getCookies   = (platform: string) =>
   request<{ content: string }>(`/api/cookies/${platform}`);
 export const saveCookies  = (platform: string, content: string) =>

@@ -44,6 +44,7 @@ from src.config import (
     SETTINGS_FILE, UPDATE_HISTORY_FILE, POST_INDEX_FILE, GDL, ARCHIVES_DIR,
     _MEDIA_EXTS,
 )
+from src.config_root import CONFIG_DIR, save_selected_config_dir, selected_config_dir
 
 def _resolve_downloader(command: str) -> str:
     """Resolve a bundled downloader in both frozen and source checkouts."""
@@ -832,7 +833,7 @@ class _PrintCapture:
 
 class AppState:
     def __init__(self):
-        for d in ("config", "config/avatars", "config/archives", "downloads", "logs"):
+        for d in (CONFIG_DIR, CONFIG_DIR / "avatars", CONFIG_DIR / "archives", _ROOT / "downloads", _ROOT / "logs"):
             Path(d).mkdir(parents=True, exist_ok=True)
 
         self._store = CreatorStore()
@@ -3191,7 +3192,33 @@ def get_settings():
         s["download_path"] = Path(DOWNLOAD_PATH_FILE).read_text("utf-8").strip()
     except Exception:
         s["download_path"] = str(_ROOT / "downloads")
+    s["config_dir"] = str(CONFIG_DIR)
+    s["next_config_dir"] = str(selected_config_dir())
+    s["config_restart_required"] = selected_config_dir() != CONFIG_DIR
     return s
+
+
+class SaveConfigDirectoryRequest(BaseModel):
+    path: str
+
+
+@app.put("/api/settings/config-directory")
+def save_config_directory(req: SaveConfigDirectoryRequest):
+    if state.running:
+        raise HTTPException(409, "Stop the current operation before changing the configuration folder.")
+    raw = req.path.strip()
+    if not raw:
+        raise HTTPException(400, "Choose a configuration folder.")
+    try:
+        target = save_selected_config_dir(raw)
+    except OSError as exc:
+        raise HTTPException(400, f"Configuration folder is unavailable or not writable: {exc}") from exc
+    return {
+        "ok": True,
+        "config_dir": str(CONFIG_DIR),
+        "next_config_dir": str(target),
+        "restart_required": target != CONFIG_DIR,
+    }
 
 
 class SaveSettingsRequest(BaseModel):
@@ -4272,7 +4299,7 @@ def _url_worker(cmd: list[str]):
 
 @app.get("/api/avatars/{platform}/{account_id}")
 def serve_avatar(platform: str, account_id: str):
-    p = Path("config/avatars") / f"{platform}_{account_id}.png"
+    p = CONFIG_DIR / "avatars" / f"{platform}_{account_id}.png"
     if not p.exists():
         raise HTTPException(404, "No avatar cached")
     return FileResponse(str(p), media_type="image/png")
@@ -4303,7 +4330,7 @@ def _parse_cookies(path: str) -> str:
 
 def _cache_avatar_url(platform: str, account_id: str, url: str) -> bool:
     import urllib.request
-    cache = Path("config/avatars") / f"{platform}_{account_id}.png"
+    cache = CONFIG_DIR / "avatars" / f"{platform}_{account_id}.png"
     try:
         request = urllib.request.Request(
             str(url).replace(r"\/", "/"),
@@ -4334,7 +4361,7 @@ def _cache_avatar_url(platform: str, account_id: str, url: str) -> bool:
 
 def _fetch_avatar_bg(platform: str, account_id: str) -> bool:
     import ssl, urllib.request, json as _j, http.client, subprocess as _sp, re as _re
-    cache = Path("config/avatars") / f"{platform}_{account_id}.png"
+    cache = CONFIG_DIR / "avatars" / f"{platform}_{account_id}.png"
     if cache.exists():
         return True
     try:

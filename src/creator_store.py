@@ -3,7 +3,9 @@ import threading
 import uuid
 from pathlib import Path
 
-CREATORS_FILE = "config/creators.json"
+from src.config_root import CONFIG_DIR
+
+CREATORS_FILE = str(CONFIG_DIR / "creators.json")
 UNASSIGNED_ID = "__unassigned__"  # sentinel used in creator_ids lists
 
 

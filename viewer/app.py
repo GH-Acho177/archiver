@@ -7,6 +7,7 @@ import mimetypes
 import random
 import re
 import sqlite3
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager, closing
@@ -17,13 +18,19 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.config_root import CONFIG_DIR
 
-ROOT = Path(__file__).resolve().parents[1]
+
+ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[1]
+)
 STATIC = Path(__file__).resolve().parent / "static"
-INDEX_FILE = ROOT / "config" / "post_index.json"
-CREATORS_FILE = ROOT / "config" / "creators.json"
-DB_FILE = ROOT / "config" / "viewer.db"
-DOWNLOAD_PATH_FILE = ROOT / "config" / "download_path.txt"
+INDEX_FILE = CONFIG_DIR / "post_index.json"
+CREATORS_FILE = CONFIG_DIR / "creators.json"
+DB_FILE = CONFIG_DIR / "viewer.db"
+DOWNLOAD_PATH_FILE = CONFIG_DIR / "download_path.txt"
 MEDIA_EXTENSIONS = {
     ".mp4", ".mov", ".webm", ".mkv", ".avi", ".flv", ".m4v",
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
@@ -751,7 +758,7 @@ def media(token: str):
 def avatar(platform: str, account_id: str):
     safe_platform = re.sub(r"[^a-z0-9_-]", "", platform.casefold())
     safe_account = re.sub(r"[^A-Za-z0-9_-]", "", account_id)
-    path = ROOT / "config" / "avatars" / f"{safe_platform}_{safe_account}.png"
+    path = CONFIG_DIR / "avatars" / f"{safe_platform}_{safe_account}.png"
     if path.is_file():
         return FileResponse(path, media_type="image/png")
     # A neutral silhouette is preferable to showing group initials as though
