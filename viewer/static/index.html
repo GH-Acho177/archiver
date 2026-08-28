@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="Archiver_Viewer.png">
+  <title>Archiver Viewer</title>
+  <link rel="stylesheet" href="style.css?v=11">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand"><span class="brand-mark">A</span><span>Archiver Viewer</span></div>
+    <div class="header-stats" id="stats">Loading archive…</div>
+    <button class="icon-button" id="themeButton" title="Switch theme" aria-label="Switch theme">☼</button>
+  </header>
+
+  <div class="shell">
+    <div class="content">
+      <nav class="browse-actions" id="browseActions" aria-label="Browse views">
+        <button class="nav-item active" data-filter="all"><span>▦</span>Home</button>
+        <button class="nav-item" data-filter="liked"><span>♥</span>Liked</button>
+        <button class="nav-item" data-filter="saved"><span>★</span>Saved</button>
+        <button class="nav-item" data-filter="disliked"><span>−</span>Deleted</button>
+        <span class="browse-actions-divider" aria-hidden="true"></span>
+        <button class="nav-item" id="accountsNav"><span>◎</span>Accounts</button>
+      </nav>
+      <section class="account-page-bar hidden" id="accountPageBar">
+        <button class="back-button" id="accountBack" title="Back to feed">←</button>
+        <img class="account-page-avatar" id="accountPageAvatar" alt="">
+        <div><strong id="accountPageName"></strong><small id="accountPageMeta"></small></div>
+        <div class="account-filter-tabs">
+          <button class="account-filter-tab active" data-account-filter="all">All</button>
+          <button class="account-filter-tab" data-account-filter="liked">♥ Liked</button>
+          <button class="account-filter-tab" data-account-filter="saved">★ Saved</button>
+        </div>
+        <div class="account-view-tabs">
+          <button class="account-view-tab active" data-account-view="grid">Grid</button>
+          <button class="account-view-tab" data-account-view="newest">Newest play</button>
+          <button class="account-view-tab" data-account-view="random">Random play</button>
+        </div>
+      </section>
+      <main class="feed" id="feed" aria-live="polite"></main>
+      <main class="accounts-page hidden" id="accountsPage">
+        <div class="accounts-wrap">
+          <header class="accounts-header">
+            <div><h1>Accounts</h1><p id="accountsMeta">Browse accounts in your archive.</p></div>
+            <input id="accountsSearch" type="search" placeholder="Search accounts or groups…" autocomplete="off">
+          </header>
+          <div class="accounts-grid" id="accountsGrid"></div>
+        </div>
+      </main>
+    </div>
+    <aside class="related-accounts hidden" id="relatedAccounts">
+      <div class="related-heading" id="relatedHeading">Same group</div>
+      <div class="related-list" id="relatedList"></div>
+    </aside>
+  </div>
+
+  <template id="postTemplate">
+    <article class="post-card">
+      <section class="media-stage">
+        <div class="media-strip"></div>
+        <div class="unseen-mark hidden">NEW</div>
+        <button class="media-arrow media-prev hidden" data-action="previous-media" title="Previous media">‹</button>
+        <button class="media-arrow media-next hidden" data-action="next-media" title="Next media">›</button>
+        <div class="media-pagination"><span class="media-count"></span><div class="media-dots"></div></div>
+        <button class="stage-fullscreen" data-action="fullscreen" title="Toggle monitor fullscreen (F)">⛶</button>
+        <div class="video-progress hidden"><div class="video-progress-fill"></div></div>
+        <div class="media-error hidden">This local file cannot be played.</div>
+      </section>
+      <aside class="post-actions">
+        <button class="account-avatar" data-action="account" title="View account"><img alt=""></button>
+        <button class="action-button" data-action="like" title="Like (L)"><span>♥</span><small>Like</small></button>
+        <button class="action-button" data-action="save" title="Save (S)"><span>★</span><small>Save</small></button>
+        <button class="action-button" data-action="dislike" title="Dislike (D)"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 3.5h9.1c1.2 0 2.2.8 2.5 1.9l1.1 4.2c.4 1.5-.8 2.9-2.3 2.9h-3.2l.5 3.2c.2 1.4-.5 2.8-1.8 3.5l-.7.4-4-7.1H5.1V4.8c.5-.8 1.2-1.3 2.1-1.3ZM2 4h2v9H2V4Z"/></svg></span><small>Dislike</small></button>
+      </aside>
+      <div class="post-info">
+        <div class="post-account"></div>
+        <div class="post-title"></div>
+        <div class="post-meta"></div>
+      </div>
+    </article>
+  </template>
+
+  <template id="gridPostTemplate">
+    <button class="grid-post">
+      <div class="grid-preview"></div>
+      <div class="grid-badge"></div>
+      <div class="grid-reactions"></div>
+      <div class="grid-caption"><strong></strong><small></small></div>
+    </button>
+  </template>
+
+  <div class="toast" id="toast"></div>
+  <script src="app.js?v=11" defer></script>
+</body>
+</html>

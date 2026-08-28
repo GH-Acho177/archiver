@@ -26,6 +26,28 @@ _window:            "webview.Window | None" = None
 _tray:              "pystray.Icon | None"   = None
 _hwnd:              int  = 0
 _subclass_installed: bool = False
+_fullscreen:         bool = False
+_custom_maximized:   bool = False
+_restore_bounds:     tuple[int, int, int, int] | None = None
+
+
+def _asset_path(name: str) -> Path:
+    """Return an asset path in both source and PyInstaller builds."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "assets" / name
+
+
+_APP_ICON = _asset_path("Archiver.ico")
+
+# Give the live Python/pywebview process its own taskbar identity instead of
+# inheriting Python's default application identity and icon.
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Acho.Archiver"
+        )
+    except Exception:
+        pass
 
 
 # ── Win32 structures ──────────────────────────────────────────────────────────
@@ -60,6 +82,14 @@ class _MARGINS(ctypes.Structure):
         ("bottom", ctypes.c_int),
     ]
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize",    ctypes.wintypes.DWORD),
+        ("rcMonitor", ctypes.wintypes.RECT),
+        ("rcWork",    ctypes.wintypes.RECT),
+        ("dwFlags",   ctypes.wintypes.DWORD),
+    ]
+
 
 # ── Frameless window helpers ──────────────────────────────────────────────────
 
@@ -77,12 +107,26 @@ _WINCTRLS_W  = 120 # 3 × w-10 window-control buttons (px)
 
 
 def _is_maximized() -> bool:
+    if _custom_maximized:
+        return True
     if not _hwnd:
         return False
     wp = _WINDOWPLACEMENT()
     wp.length = ctypes.sizeof(_WINDOWPLACEMENT)
     ctypes.windll.user32.GetWindowPlacement(_hwnd, ctypes.byref(wp))
     return wp.showCmd == 3  # SW_MAXIMIZE
+
+
+def _monitor_work_area(hwnd: int) -> tuple[int, int, int, int] | None:
+    user32 = ctypes.windll.user32
+    user32.MonitorFromWindow.restype = ctypes.c_void_p
+    monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return None
+    work = info.rcWork
+    return work.left, work.top, work.right - work.left, work.bottom - work.top
 
 
 def _install_subclass(hwnd: int) -> None:
@@ -118,14 +162,21 @@ def _install_subclass(hwnd: int) -> None:
             return 1  # HTCLIENT — JS handles title-bar drag via start_drag()
 
         if msg == 0x0024:  # WM_GETMINMAXINFO — respect taskbar on maximize
-            rc = ctypes.wintypes.RECT()
-            ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rc), 0)
-            mmi = ctypes.cast(lparam, ctypes.POINTER(_MINMAXINFO))
-            mmi.contents.ptMaxPosition.x = rc.left
-            mmi.contents.ptMaxPosition.y = rc.top
-            mmi.contents.ptMaxSize.x     = rc.right  - rc.left
-            mmi.contents.ptMaxSize.y     = rc.bottom - rc.top
-            return 0
+            user32 = ctypes.windll.user32
+            user32.MonitorFromWindow.restype = ctypes.c_void_p
+            monitor = user32.MonitorFromWindow(hwnd, 2)
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                work, bounds = info.rcWork, info.rcMonitor
+                mmi = ctypes.cast(lparam, ctypes.POINTER(_MINMAXINFO))
+                mmi.contents.ptMaxPosition.x = work.left - bounds.left
+                mmi.contents.ptMaxPosition.y = work.top - bounds.top
+                mmi.contents.ptMaxSize.x = work.right - work.left
+                mmi.contents.ptMaxSize.y = work.bottom - work.top
+                mmi.contents.ptMaxTrackSize.x = mmi.contents.ptMaxSize.x
+                mmi.contents.ptMaxTrackSize.y = mmi.contents.ptMaxSize.y
+                return 0
 
         return ctypes.windll.comctl32.DefSubclassProc(hwnd, msg, wparam, lparam)
 
@@ -197,7 +248,21 @@ def _apply_thick_frame() -> None:
 
 class JsApi:
     def start_drag(self) -> None:
+        global _custom_maximized, _restore_bounds
         if _hwnd:
+            # Match native Windows behavior: dragging a maximized window first
+            # restores it beneath the pointer, then begins the caption drag.
+            if _custom_maximized and _restore_bounds:
+                cursor = _POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(cursor))
+                _, _, width, height = _restore_bounds
+                x = cursor.x - width // 2
+                y = cursor.y - _TITLE_H // 2
+                ctypes.windll.user32.SetWindowPos(
+                    _hwnd, None, x, y, width, height, 0x0024,
+                )
+                _custom_maximized = False
+                _restore_bounds = None
             ctypes.windll.user32.ReleaseCapture()
             ctypes.windll.user32.PostMessageW(_hwnd, 0x00A1, 2, 0)  # WM_NCLBUTTONDOWN, HTCAPTION
 
@@ -206,14 +271,53 @@ class JsApi:
             _window.minimize()
 
     def toggle_maximize(self) -> None:
-        if _window:
+        global _custom_maximized, _restore_bounds
+        if _hwnd:
+            user32 = ctypes.windll.user32
+            if _custom_maximized:
+                bounds = _restore_bounds
+                _custom_maximized = False
+                _restore_bounds = None
+                if bounds:
+                    user32.SetWindowPos(_hwnd, None, *bounds, 0x0024)
+                return
+            # Recover first if Windows/pywebview left the window in its native
+            # maximized state, then apply explicit taskbar-safe work bounds.
             if _is_maximized():
-                _window.restore()
-            else:
-                _window.maximize()
+                user32.ShowWindow(_hwnd, 9)  # SW_RESTORE
+            current = ctypes.wintypes.RECT()
+            if user32.GetWindowRect(_hwnd, ctypes.byref(current)):
+                _restore_bounds = (
+                    current.left, current.top,
+                    current.right - current.left, current.bottom - current.top,
+                )
+            work = _monitor_work_area(_hwnd)
+            if work:
+                user32.SetWindowPos(_hwnd, None, *work, 0x0024)
+                _custom_maximized = True
+        elif _window:
+            (_window.restore if _is_maximized() else _window.maximize)()
+
+    def toggle_fullscreen(self) -> bool:
+        """Toggle monitor fullscreen independently from maximize."""
+        global _fullscreen
+        if not _window:
+            return False
+        _window.toggle_fullscreen()
+        _fullscreen = not _fullscreen
+        return _fullscreen
 
     def close_window(self) -> None:
         if _window:
+            try:
+                # The Viewer runs in an iframe on the API origin. Notify it
+                # before hiding the native window so tray mode is always quiet.
+                _window.evaluate_js(
+                    "document.querySelector('iframe[title=\"Archive Viewer\"]')"
+                    "?.contentWindow?.postMessage({type:'archiver:pause-viewer'}, '*')"
+                )
+            except Exception:
+                pass
             _window.hide()
 
     def is_maximized(self) -> bool:
@@ -227,7 +331,7 @@ def _start_server() -> None:
                 reload=False, log_level="error")
 
 
-def _wait_for_server(timeout: float = 10.0) -> bool:
+def _wait_for_server(timeout: float = 90.0) -> bool:
     import urllib.request
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -242,9 +346,9 @@ def _wait_for_server(timeout: float = 10.0) -> bool:
 # ── Tray ──────────────────────────────────────────────────────────────────────
 
 def _make_icon() -> Image.Image:
-    ico = Path(__file__).parent / "assets" / "icon.ico"
-    if ico.exists():
-        return Image.open(ico).convert("RGBA")
+    artwork = _asset_path("Archiver.png")
+    if artwork.exists():
+        return Image.open(artwork).convert("RGBA")
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     ImageDraw.Draw(img).ellipse([4, 4, 60, 60], fill=(29, 155, 240, 255))
     return img
@@ -256,6 +360,11 @@ def _show() -> None:
 
 
 def _quit(icon: "pystray.Icon") -> None:
+    try:
+        from viewer.app import flush_pending_deletions
+        flush_pending_deletions()
+    except Exception as exc:
+        print(f"[Viewer] Could not finish pending deletions: {exc}")
     icon.stop()
     if _window:
         _window.destroy()
@@ -270,6 +379,8 @@ def _on_started() -> None:
     _hwnd = _find_hwnd()
     if not _hwnd:
         return
+    from helpers.window_icon import apply_window_icon
+    apply_window_icon(_hwnd, _APP_ICON)
     _setup_frameless_window(_hwnd)
 
 
@@ -311,7 +422,7 @@ def _prepare_index() -> str:
 if __name__ == "__main__":
     threading.Thread(target=_start_server, daemon=True).start()
     if not _wait_for_server():
-        sys.exit("API server failed to start within 10 s")
+        sys.exit("API server failed to start within 90 s")
 
     _tray = pystray.Icon(
         "Archiver", _make_icon(), "Archiver",
@@ -327,7 +438,13 @@ if __name__ == "__main__":
         frameless=True, easy_drag=False, js_api=JsApi(), background_color="#2b2b2b",
     )
     _window.events.loaded += _apply_thick_frame
-    webview.start(_on_started, http_server=True)
+    webview.start(
+        _on_started,
+        http_server=True,
+        private_mode=False,
+        storage_path=str(_wv2_dir),
+        icon=str(_APP_ICON),
+    )
 
     if _tray:
         _tray.stop()

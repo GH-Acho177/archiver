@@ -27,8 +27,7 @@ MinVersion=10.0
 PrivilegesRequired=admin
 ; Appearance
 WizardStyle=modern
-; Icon (comment out if you have no icon.ico yet)
-SetupIconFile=..\assets\icon.ico
+SetupIconFile=..\assets\Archiver.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 ; Misc
 ShowLanguageDialog=no

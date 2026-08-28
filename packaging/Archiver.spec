@@ -17,17 +17,18 @@ hiddenimports = []
 datas += collect_data_files('f2')                               # f2 language / config files
 datas += [(str(_root / 'helpers'), 'helpers')]                  # f2_one.py, f2_user.py, tg_bot.py
 datas += [(str(_root / 'src'), 'src')]                          # api.py, config.py, creator_store.py
+datas += [(str(_root / 'viewer'), 'viewer')]                    # integrated archive viewer
 if (_root / 'ui' / 'dist').exists():
     datas += [(str(_root / 'ui' / 'dist'), 'ui/dist')]          # React build
 
 # Assets (icon + platform icons)
 _assets = _root / 'assets'
-for _asset in ('icon.ico', 'icon.png', 'X.png', 'douyin.png', 'bilibili.png'):
+for _asset in ('Archiver.png', 'Archiver.ico', 'Archiver_Viewer.png', 'Archiver_Viewer.ico', 'X.png', 'douyin.png', 'bilibili.png', 'xiaohongshu.png'):
     if (_assets / _asset).exists():
         datas += [(str(_assets / _asset), 'assets')]
 
 # ── Bundled tool binaries (live next to this spec in packaging/) ───────────────
-for _name in ('gallery-dl.exe', 'yt-dlp.exe'):
+for _name in ('gallery-dl.exe', 'yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe'):
     _p = Path(SPECPATH) / _name
     if _p.exists():
         binaries.append((str(_p), '.'))
@@ -63,6 +64,14 @@ hiddenimports += [
     'f2.utils.utils',
     'aiohttp',
     'aiofiles',
+    'truststore',
+    'websockets',
+    'xhs_cli',
+    'xhs_cli.client',
+    'xhs_cli.client_mixins',
+    'xhshow',
+    'httpx',
+    'Crypto',
 ]
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
@@ -85,7 +94,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # ── EXE ────────────────────────────────────────────────────────────────────────
-_icon = str(_root / 'assets' / 'icon.ico') if (_root / 'assets' / 'icon.ico').exists() else None
+_icon = str(_root / 'assets' / 'Archiver.ico') if (_root / 'assets' / 'Archiver.ico').exists() else None
 
 exe = EXE(
     pyz,

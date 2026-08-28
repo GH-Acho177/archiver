@@ -21,6 +21,7 @@
 | **History log** | Per-run breakdown; double-click any file to open it |
 | **Telegram bot** | Send a link from your phone — it downloads on the PC |
 | **Theme & language** | Dark / light · English / Chinese |
+| **Archive Viewer** | Integrated TikTok-style local viewer with likes, dislikes, saves, and viewing history |
 
 ---
 
@@ -31,6 +32,20 @@ Download the latest installer from the [Releases](https://github.com/GH-Acho177/
 ---
 
 ## Getting Started
+
+### Archive Viewer
+
+Viewer is built into Archiver and opens from the main sidebar. It retains likes,
+saves, viewing history, and the durable delayed-deletion queue in
+`config/viewer.db`. Posts marked for deletion have a five-minute undo window.
+The Accounts page combines tracked accounts with accounts
+found only in the local archive; its **Open in Viewer** action opens the
+corresponding account feed.
+
+Use the mouse wheel or arrow keys to move through posts. Keyboard shortcuts are
+`L` to like, `D` to dislike, `S` to save, and Space to pause or resume.
+Multi-image posts move horizontally. Use **Rescan archive** after syncing if
+Viewer was already open.
 
 ### Authentication
 
@@ -73,10 +88,11 @@ Trigger downloads from your phone without touching the PC.
 
 **Sending a post URL**
 
-Send any post link (X, Douyin, or Bilibili). Supported formats:
+Send any post link (X, Douyin, Bilibili, or Xiaohongshu). Supported formats:
 
 - `https://x.com/user/status/…`
 - `https://www.bilibili.com/video/…`
+- `https://www.xiaohongshu.com/explore/…`
 - `https://v.douyin.com/XXXXX/` — short links resolved automatically
 - Douyin share blurbs (`6.92 复制打开抖音… https://v.douyin.com/…`) — URL extracted automatically
 - `https://b23.tv/…` — short links with UTM params resolved before routing
@@ -123,10 +139,11 @@ downloads/
 **1. Python dependencies**
 
 ```bash
-pip install fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles
+pip install fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles xiaohongshu-cli==0.6.4
 ```
 
-`gallery-dl` and `yt-dlp` must be on `PATH` or placed in `packaging/`.
+`gallery-dl`, `yt-dlp`, `ffmpeg`, and `ffprobe` must be on `PATH` or placed in
+`packaging/`.
 
 **2. Frontend**
 
@@ -147,7 +164,7 @@ python run_api.py
 **1. Dependencies**
 
 ```bash
-pip install pyinstaller fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles
+pip install pyinstaller fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles xiaohongshu-cli==0.6.4
 ```
 
 **2. Frontend** *(the PyInstaller spec bundles `ui/dist`)*
@@ -162,6 +179,7 @@ cd ui && npm run build && cd ..
 |--------|--------|
 | `gallery-dl.exe` | [mikf/gallery-dl](https://github.com/mikf/gallery-dl/releases) |
 | `yt-dlp.exe` | [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases) |
+| `ffmpeg.exe` / `ffprobe.exe` | [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds/releases) |
 
 **4. PyInstaller**
 
@@ -208,7 +226,7 @@ packaging/
 - Window drag restricted to title bar only via pywebview `.pywebview-drag-region` class; buttons block drag via `stopPropagation`
 
 ### v5.0.4
-- Telegram bot: send a Douyin/Bilibili/X **profile link** to add it as a tracked account; bot fetches display name automatically and prompts for group assignment
+- Telegram bot: send a Douyin/Bilibili/X/Xiaohongshu **profile link** to add it as a tracked account; bot fetches display name automatically and prompts for group assignment
 - Telegram bot: replying **0** to the group prompt creates a new group named after the account
 - Add account UI: replaced platform/handle/group form with a single profile-link input — platform and display name are auto-detected
 - Bilibili: fetch display name via public API when adding accounts
