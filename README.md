@@ -1,331 +1,256 @@
 # Archiver
 
-**Batch-download and archive media from X (Twitter), Douyin, and Bilibili — on Windows.**
+Archiver is a Windows desktop application for continuously backing up creator media from **X**, **Douyin**, **Bilibili**, and **Xiaohongshu**. It combines account tracking, incremental and complete synchronization, archive maintenance, remote-availability checks, Telegram control, and a local media viewer in one application.
 
-[![Version](https://img.shields.io/badge/version-5.0.5-blue)](https://github.com/GH-Acho177/media-downloader/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)](https://github.com/GH-Acho177/media-downloader/releases/latest)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Release](https://img.shields.io/github/v/release/GH-Acho177/archiver?display_name=tag)](https://github.com/GH-Acho177/archiver/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d4)](https://github.com/GH-Acho177/archiver/releases)
+[![Python](https://img.shields.io/badge/python-3.12-3776ab)](https://www.python.org/)
 
----
+## What Archiver does
 
-## Features
+- Tracks accounts across four platforms and organizes them into creator groups.
+- Runs fast recent-post **Update** syncs or completeness-focused **Full** syncs.
+- Uses account- and post-level concurrency while applying platform-specific throttling.
+- Scans local files instead of relying only on downloader archive records.
+- Reports local posts, posts available remotely, matched posts, and downloads per account.
+- Detects missing, remotely unavailable, and corrupt local media.
+- Groups multi-image and mixed-media posts as a single post.
+- Finds duplicate files within creator groups and isolates cross-account duplicates.
+- Downloads individual post URLs and missing posts discovered during verification.
+- Provides per-account progress cards, scoped logs, summaries, retry controls, and history.
+- Supports remote status, sync control, account management, and URL submission through Telegram.
+- Includes a local TikTok-style Viewer with Home, Liked, Saved, Deleted, and account grids.
 
-| Feature | Description |
-|---------|-------------|
-| **Three platforms** | X (Twitter), Douyin, Bilibili |
-| **Sync modes** | Update (new only), Full (complete history), Auto (scheduled) |
-| **Creator groups** | Organise accounts across platforms under named creators |
-| **URL download** | Paste any post URL for an immediate one-off download |
-| **File browser** | In-app file list with double-click to open |
-| **Post index** | Track which downloaded posts have since been deleted (ghost check) |
-| **History log** | Per-run breakdown; double-click any file to open it |
-| **Telegram bot** | Send a link from your phone — it downloads on the PC |
-| **Theme & language** | Dark / light · English / Chinese |
-| **Archive Viewer** | Integrated TikTok-style local viewer with likes, dislikes, saves, and viewing history |
+## Main workflow
 
----
+The desktop application has four destinations:
+
+| Page | Purpose |
+|---|---|
+| **Sync** | Start or stop synchronization, choose Update or Full mode, run maintenance, download a URL, inspect progress, retry failed accounts, and review logs/history. |
+| **Browse** | Review the local archive, react to posts, browse collections, and open account grids. |
+| **Account** | Add, search, group, move, inspect, verify, rename, or remove tracked accounts. |
+| **Setting** | Configure download location, workers, pacing, scheduling, cookies, Viewer playback, language, theme, Telegram, and databases. |
+
+Archiver always opens on **Sync**. Keyboard navigation uses `Ctrl+1` through `Ctrl+4`; `Ctrl+F` focuses the active search field and `Ctrl+S` saves Settings.
+
+## Synchronization modes
+
+### Update
+
+Update is optimized for frequent runs. It begins with the newest posts and stops after reaching content already present locally. This makes it suitable for catching recent posts before they are removed without enumerating an account's entire history every time.
+
+### Full
+
+Full mode works toward archive completeness. It enumerates the remote history available to the platform client, compares it with local post IDs, downloads missing posts, and verifies whether local posts are still available remotely. Optional day limits can restrict the remote range.
+
+Platform APIs can rate-limit, hide, paginate inconsistently, or return incomplete lists. Archiver reports incomplete verification instead of treating an uncertain result as a deletion.
+
+### Maintenance
+
+Maintenance is group-selectable and local-first. It scans files across account folders in each selected creator group:
+
+- Same-content duplicates in one account folder are reduced to the best-titled copy.
+- Same-content files found across different account folders are moved out of the originals and placed in the group's `duplicated` folder.
+- Sync is blocked while a `duplicated` folder still contains unresolved files, preventing automatic redownload loops.
+
+## Archive Viewer
+
+Browse presents posts in a randomized feed. Accounts are sampled evenly, unseen and less-recently viewed posts receive more weight, and newer releases receive an additional boost. Reopening Browse creates a fresh sequence.
+
+Viewer features include:
+
+- Multi-file posts with horizontal media navigation.
+- Full-monitor playback and responsive portrait/landscape sizing.
+- Per-account, Liked, Saved, and Deleted grids.
+- Newest-first and random account playback.
+- Likes, saves, view history, last-seen weighting, and keyboard controls.
+- Shared theme, default volume, and loop settings.
+
+Useful shortcuts:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Previous or next post |
+| `←` / `→` | Previous/next image, or seek video timeline |
+| Hold `→` | Temporarily speed up video playback |
+| `Space` | Pause or resume video |
+| `L` | Like |
+| `S` | Save |
+| `D` | Mark for deletion |
+| `F` or double-click | Enter or leave fullscreen |
+| `Esc` | Leave fullscreen |
+
+### Delayed deletion
+
+Marking a post for deletion schedules every media file belonging to that post for deletion after five minutes. Removing the mark during that window cancels the job. The queue is durable across restarts, and choosing **Quit** from the tray completes all pending jobs immediately. Closing the window with `X` only sends Archiver to the tray.
+
+Deleted posts remain as non-playable records in the **Deleted** collection. The Viewer database is stored at `config/viewer.db`.
 
 ## Installation
 
-Download the latest installer from the [Releases](https://github.com/GH-Acho177/media-downloader/releases/latest) page and run it. No additional setup required.
+Download the latest Windows installer from [GitHub Releases](https://github.com/GH-Acho177/archiver/releases/latest).
 
----
+On first launch:
 
-## Getting Started
+1. Open **Setting** and choose a writable download directory.
+2. Import cookies for the platforms you use.
+3. Open **Account**, add a profile link, and assign or create its creator group.
+4. Return to **Sync** and run Update.
 
-### Archive Viewer
+## Authentication
 
-Viewer is built into Archiver and opens from the main sidebar. It retains likes,
-saves, viewing history, and the durable delayed-deletion queue in
-`config/viewer.db`. Posts marked for deletion have a five-minute undo window.
-The Accounts page combines tracked accounts with accounts
-found only in the local archive; its **Open in Viewer** action opens the
-corresponding account feed.
+Export Netscape-format `cookies.txt` files from a browser session already logged into each platform. One option is [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc).
 
-Use the mouse wheel or arrow keys to move through posts. Keyboard shortcuts are
-`L` to like, `D` to dislike, `S` to save, and Space to pause or resume.
-Multi-image posts move horizontally. Use **Rescan archive** after syncing if
-Viewer was already open.
+Import each file from **Setting → Cookies**. Cookies and browser profiles are local runtime data and are excluded from Git.
 
-### Authentication
+Douyin account enumeration uses a dedicated Edge profile when required by the platform. Do not use that profile for ordinary browsing; Archiver manages it during scans.
 
-Each platform requires a browser cookie file.
+## Adding accounts
 
-1. Install **[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** in Chrome or Edge.
-2. Log in to the platform in your browser.
-3. Export cookies and save the `.txt` file.
-4. In Archiver → **Settings → Authentication → Import cookies.txt**
+Paste a profile URL into **Account → Add account**. Archiver resolves the platform, stable account identifier, display name, avatar, and local account folder. Duplicate accounts are rejected whether they are submitted from the desktop app or Telegram.
 
-### Adding Accounts
+Supported inputs include:
 
-Go to the **Accounts** panel and add accounts under any Creator group.
+| Platform | Examples |
+|---|---|
+| X | `https://x.com/username` or a username |
+| Douyin | A profile/share link or `sec_uid` |
+| Bilibili | `https://space.bilibili.com/UID` or a UID |
+| Xiaohongshu | A profile link, share message, or `xhslink.cn` short link |
 
-| Platform | Accepted input |
-|----------|----------------|
-| X (Twitter) | Profile URL or bare username |
-| Douyin | Profile URL or bare `sec_uid` |
-| Bilibili | Space URL or bare UID |
+Renaming a creator group also renames its archive folder and rewrites stored path references. Removing an account removes its downloader records; empty creator groups are cleaned automatically.
 
-### Downloading
+## Telegram bot
 
-| Mode | Behaviour |
-|------|-----------|
-| **Update** | Fetches posts since the last run |
-| **Full** | Downloads complete history (optional date range) |
-| **Auto** | Runs Update on a timer in the background |
+Create a bot with [@BotFather](https://t.me/BotFather), then paste its token into **Setting → Telegram bot** and select **Save & Start**. The first user to contact a new bot becomes the allowed user.
 
----
+Commands:
 
-## Telegram Bot
+| Command | Description |
+|---|---|
+| `/status` | Show whether a sync is running and list active account progress. |
+| `/sync` | Start an Update sync for all accounts. |
+| `/sync full` | Start a Full sync for all accounts. |
+| `/stop` | Request cancellation of the current sync. |
+| `/accounts` | List tracked accounts with stable numbers. |
+| `/deleteaccount NUMBER` | Start a confirmed account-removal flow. |
+| `/cancel` | Cancel the current guided action. |
 
-Trigger downloads from your phone without touching the PC.
+Sending a supported post URL queues a one-off download. Sending a profile link starts the guided account-add flow. Accounts may be added while a sync is running, but operations that would conflict with active archive mutation remain guarded.
 
-**Setup**
+## Download layout
 
-1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token.
-2. In Archiver → **Settings → Telegram Bot → paste token → Save & Start**.
-3. Send any message to the bot — your user ID is whitelisted on first contact.
-
-**Sending a post URL**
-
-Send any post link (X, Douyin, Bilibili, or Xiaohongshu). Supported formats:
-
-- `https://x.com/user/status/…`
-- `https://www.bilibili.com/video/…`
-- `https://www.xiaohongshu.com/explore/…`
-- `https://v.douyin.com/XXXXX/` — short links resolved automatically
-- Douyin share blurbs (`6.92 复制打开抖音… https://v.douyin.com/…`) — URL extracted automatically
-- `https://b23.tv/…` — short links with UTM params resolved before routing
-
-**Adding an account via bot**
-
-Send a profile URL and the bot starts a guided flow:
-
-```
-You  →  https://v.douyin.com/XXXXX/
-Bot  ←  📋 Douyin account: <display name>
-        Create a new creator for this account? (yes / no)
-You  →  yes
-Bot  ←  ✓ Created creator '<display name>' and added the account.
-
-         — or —
-
-You  →  no
-Bot  ←  Choose a creator:
-        1. Creator A
-        2. Creator B
-You  →  2
-Bot  ←  ✓ Added to 'Creator B'.
-```
-
-Send `/cancel` at any time to abort.
-
----
-
-## Download Structure
-
-```
-downloads/
-├── {Creator Name}/
-│   └── {media files}
+```text
+<download path>/
+├── Creator name/
+│   ├── Account A [platform]/
+│   │   └── post media
+│   ├── Account B [platform]/
+│   │   └── post media
+│   └── duplicated/
 └── Unassigned/
-    └── {media files}
 ```
 
----
+File names include the post title when available and retain the stable post ID so local scanning, grouping, verification, and redownload operations remain possible when titles change.
 
-## Running from Source
+## Run from source
 
-**1. Python dependencies**
+Requirements:
 
-```bash
-pip install fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles xiaohongshu-cli==0.6.4
+- Windows 10 or newer
+- Python 3.12
+- Node.js and npm
+- Microsoft Edge/WebView2 Runtime
+- `gallery-dl`, `yt-dlp`, `ffmpeg`, and `ffprobe` on `PATH` or in `packaging/`
+
+Using [uv](https://docs.astral.sh/uv/):
+
+```powershell
+uv sync --dev
+cd ui
+npm install
+npm run build
+cd ..
+uv run python run_api.py
 ```
 
-`gallery-dl`, `yt-dlp`, `ffmpeg`, and `ffprobe` must be on `PATH` or placed in
-`packaging/`.
+Using an existing Python 3.12 environment:
 
-**2. Frontend**
-
-```bash
-cd ui && npm install && npm run build && cd ..
-```
-
-**3. Run**
-
-```bash
+```powershell
+python -m pip install -e .
+cd ui
+npm install
+npm run build
+cd ..
 python run_api.py
 ```
 
----
+The standalone Viewer entry point remains available for development:
 
-## Building a Release
-
-**1. Dependencies**
-
-```bash
-pip install pyinstaller fastapi "uvicorn[standard]" pywebview pystray pillow f2 aiohttp aiofiles xiaohongshu-cli==0.6.4
+```powershell
+python run_viewer.py
 ```
 
-**2. Frontend** *(the PyInstaller spec bundles `ui/dist`)*
+## Build a Windows release
 
-```bash
-cd ui && npm run build && cd ..
-```
+Place these external tools in `packaging/`:
 
-**3. Third-party binaries** — place in `packaging/`
-
-| Binary | Source |
-|--------|--------|
+| File | Project |
+|---|---|
 | `gallery-dl.exe` | [mikf/gallery-dl](https://github.com/mikf/gallery-dl/releases) |
 | `yt-dlp.exe` | [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases) |
-| `ffmpeg.exe` / `ffprobe.exe` | [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds/releases) |
+| `ffmpeg.exe`, `ffprobe.exe` | [yt-dlp/FFmpeg-Builds](https://github.com/yt-dlp/FFmpeg-Builds/releases) |
 
-**4. PyInstaller**
+Then build the frontend and application:
 
-```bash
-pyinstaller packaging/Archiver.spec
-# output: dist\Archiver\
+```powershell
+cd ui
+npm install
+npm run build
+cd ..
+uv run pyinstaller packaging/Archiver.spec
 ```
 
-**5. Installer** *(optional)*
+The onedir build is written to `dist/Archiver/`. Compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to create the installer.
 
-Compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php).
+The downloader binaries, runtime databases, cookies, browser profiles, downloads, and DigiViewer project are intentionally excluded from this repository.
 
----
+## Project layout
 
-## Project Structure
-
-```
-run_api.py              # Entry point — FastAPI server + pywebview window
+```text
+run_api.py                 Desktop entry point, tray integration, and API host
+run_viewer.py              Standalone Viewer development entry point
 src/
-  api.py                # All REST endpoints
-  config.py             # Platform config, constants, theme colours, i18n strings
-  creator_store.py      # Creator / account persistence
+  api.py                   Sync engine, REST API, verification, bot orchestration
+  config.py                Platform configuration and runtime paths
+  creator_store.py         Creator groups and tracked-account persistence
 helpers/
-  f2_user.py            # Douyin batch downloader
-  f2_one.py             # Douyin single-post downloader
-  tg_bot.py             # Telegram bot (stdlib only, no SDK)
+  douyin_browser.py        Edge-based Douyin account enumeration
+  f2_user.py               Douyin account downloader
+  f2_one.py                Douyin single-post downloader
+  tg_bot.py                Lightweight Telegram long-polling client
+  xiaohongshu_user.py      Xiaohongshu account support
 ui/
-  src/                  # React + TypeScript source
-  dist/                 # Built frontend — served by FastAPI
-assets/
-  icon.ico
+  src/                     React and TypeScript Archiver interface
+  dist/                    Production frontend bundled by PyInstaller
+viewer/
+  app.py                   Viewer API, index, state, and deletion queue
+  static/                  Viewer interface
 packaging/
-  Archiver.spec         # PyInstaller spec
-  installer.iss         # Inno Setup script
+  Archiver.spec            PyInstaller configuration
+  installer.iss            Inno Setup configuration
 ```
 
----
+## Local data and safety
 
-## Changelog
+Archiver writes user state beneath `config/`, downloads beneath the configured archive path, and logs beneath `logs/`. These locations are ignored by Git.
 
-### v5.0.5
-- Right-click any download entry (Downloads, Dashboard history, History, Posts modal) for **Open** and **Redownload** context menu actions
-- Redownload deletes the existing file first so downloaders don't skip it
-- Window drag restricted to title bar only via pywebview `.pywebview-drag-region` class; buttons block drag via `stopPropagation`
+- File deletion is restricted to resolved paths inside the configured archive root.
+- Destructive account and database actions require explicit confirmation.
+- Remote-list uncertainty remains **Unchecked** instead of being misreported as deleted.
+- Maintenance never treats unresolved remote metadata as proof that a local file should be removed.
 
-### v5.0.4
-- Telegram bot: send a Douyin/Bilibili/X/Xiaohongshu **profile link** to add it as a tracked account; bot fetches display name automatically and prompts for group assignment
-- Telegram bot: replying **0** to the group prompt creates a new group named after the account
-- Add account UI: replaced platform/handle/group form with a single profile-link input — platform and display name are auto-detected
-- Bilibili: fetch display name via public API when adding accounts
-- Window drag restricted to title bar only (OS-level HTCAPTION hit-test; no JS required)
+## License
 
-### v5.0.3
-- Simple log mode: drops all download tool output — only creator headers, errors, warnings, and corrupt notices remain
-- Full log mode: collapse carriage-return progress lines so each file shows one clean final state instead of stacked percentage lines
-- Fix `sleep_req` NameError (was read in caller scope, moved into `_run_handle`)
-
-### v5.0.2
-- Wire `sleep_req` setting into Douyin (f2) page fetches — defaults to 1s between API pages to avoid rate limiting
-
-### v5.0.1
-- Auto-detect and remove corrupt/truncated media files during sync; re-download on next run (Douyin archive entries also purged)
-- Simple log mode: collapses download progress into single `↓ filename (size)` lines, hides extractor/merger/already-downloaded noise
-
-### v5.0.0
-- **UI rewrite** — replaced Tkinter/sv_ttk with React + TypeScript, served by FastAPI (uvicorn) and embedded via pywebview. Entry point is now `run_api.py`.
-- Double-click any file in the Posts dialog or History log to open it with the default app
-- Hover highlight on all clickable file rows
-- History log filters out runs and accounts with zero new downloads (UI + API level)
-- Post index stores absolute paths; endpoint falls back to a root search if the path no longer resolves
-- Removed `app.py`, `src/utils.py`, `fonts/`, `sv_ttk` dependency
-
-### v4.0.6
-- Avatar tiles in the Accounts panel open a Posts dialog showing all downloaded files, with deleted posts highlighted in red
-- Ghost check merged into the Posts dialog — no separate window
-- Fixed X avatar fetching (switched from deprecated guest-token API to gallery-dl JSON output)
-
-### v4.0.5
-- Fixed X profile URL incorrectly stored as display name when adding an account via URL
-
-### v4.0.4
-- Installer prompts for install path (defaults to Program Files)
-
-### v4.0.3
-- History hides accounts with zero new downloads
-- Telegram bot Stop no longer clears the saved token
-
-### v4.0.2
-- Douyin `max_connections` and `max_tasks` raised from 5 → 10
-- Douyin `page_counts` raised from 20 → 50 to reduce listing round-trips
-
-### v4.0.1
-- Bot queues URLs received during an active download and processes them when it finishes
-- Bot replies with the download result after each bot-triggered job
-
-### v4.0.0
-- Telegram bot account-sharing flow: send a profile URL to add it to a creator group
-- Resolves short links (v.douyin.com, b23.tv) and fetches display names for all platforms
-- Supports share blurbs, short links, and UTM-tagged URLs
-
-### v3.2.0
-- Bot guided flow for profile URLs: create new creator or assign to existing
-- `/cancel` aborts any in-progress conversation
-
-### v3.1.9
-- Telegram bot — stdlib-only implementation, no SDK required
-- Token and whitelist stored in `config/settings.json`; first message auto-whitelists sender
-
-### v3.1.8
-- Fixed frozen/unresponsive UI during heavy download output; log writes now batch-flushed every 50 ms
-
-### v3.1.7
-- Corrupt-file detection validates MP4 box structure
-- Corrupt Douyin files re-downloaded immediately via single-post fetch
-- Leftover `.part` / `.tmp` stubs cleaned up automatically
-
-### v3.1.6
-- Line-by-line live log output (unbuffered subprocess stdout)
-- Progressive inter-user sleep to reduce rate-limit exposure
-- Fixed X filename sanitisation (`{date_url}` replaces unreliable `{date}`)
-
-### v3.1.4
-- Display names auto-fetched from platform on account add
-- Configurable auto-sync interval
-
-### v3.1.0
-- Dark title bar (DwmSetWindowAttribute)
-- Animated theme transitions
-- Post URL one-off download button on dashboard
-
-### v3.0.0
-- Renamed to **Archiver**
-- Download structure changed to `downloads/{Creator}/{account}/`
-- Parallel cross-platform downloads via per-platform thread pools
-- Combined per-run history record across all platforms
-
-### v2.1.2
-- DPI-aware scaling throughout
-- Persistent settings via `config/settings.json`
-- Moved `config.py` / `utils.py` into `src/` package
-
-### v2.0.0
-- Configurable download path
-- Auto-create runtime directories on startup
-- Subprocess console windows hidden in release builds
-
-### v1.0.0
-- Initial release — Tkinter GUI for X, Douyin, and Bilibili
-- Update mode, Full mode, parallel downloads, cookie import, dark/light theme, EN/ZH
+No license file is currently included. Unless the repository owner states otherwise, all rights are reserved.
