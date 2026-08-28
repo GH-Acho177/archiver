@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   getSettings, saveSettings, getCookies, saveCookies,
   getTgStatus, startTgBot, stopTgBot, resetDatabase,
@@ -8,7 +8,7 @@ import {
 import { PlatformChip } from "../components/PlatformChip";
 import { useLang, type Lang, type Theme } from "../i18n";
 
-const COOKIE_PLATFORMS = ["x", "douyin", "bilibili"] as const;
+const COOKIE_PLATFORMS = ["x", "douyin", "bilibili", "xiaohongshu"] as const;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -49,13 +49,15 @@ export default function Settings({ active }: { active: boolean }) {
 
   const [dbMsg, setDbMsg]     = useState("");
   const [dbBusy, setDbBusy]   = useState(false);
+  const loaded = useRef(false);
 
   const refreshTg = useCallback(() => {
     getTgStatus().then(setTg).catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || loaded.current) return;
+    loaded.current = true;
     getSettings().then(setCfg).catch(() => {});
     Promise.all(
       COOKIE_PLATFORMS.map(p => getCookies(p).then(r => [p, r.content] as const))
@@ -68,17 +70,43 @@ export default function Settings({ active }: { active: boolean }) {
   const set = <K extends keyof AppSettings>(k: K, v: AppSettings[K]) =>
     setCfg(s => ({ ...s, [k]: v }));
 
-  const handleSave = async () => {
+  const saveDownloadPath = async (path: string) => {
     setError("");
     try {
-      await saveSettings(cfg);
-      await Promise.all(COOKIE_PLATFORMS.map(p => saveCookies(p, cookies[p] ?? "")));
+      await saveSettings({ download_path: path });
+      const latest = await getSettings();
+      setCfg(current => ({ ...current, download_path: latest.download_path }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  const handleSave = async () => {
+    setError("");
+    try {
+      await saveSettings(cfg);
+      await Promise.all(COOKIE_PLATFORMS.map(p => saveCookies(p, cookies[p] ?? "")));
+      setCfg(await getSettings());
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    if (!active) return;
+    const saveShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void handleSave();
+      }
+    };
+    window.addEventListener("keydown", saveShortcut);
+    return () => window.removeEventListener("keydown", saveShortcut);
+  }, [active, cfg, cookies]);
 
   return (
     <div className="flex flex-col h-full bg-bg overflow-y-auto">
@@ -92,7 +120,11 @@ export default function Settings({ active }: { active: boolean }) {
               {(["dark", "light"] as Theme[]).map(th => (
                 <button
                   key={th}
-                  onClick={() => setTheme(th)}
+                  onClick={() => {
+                    setTheme(th);
+                    set("viewer_theme", th);
+                    void saveSettings({ viewer_theme: th });
+                  }}
                   className={`px-4 py-1.5 rounded text-sm transition-colors ${
                     theme === th
                       ? "bg-accent text-white"
@@ -128,6 +160,41 @@ export default function Settings({ active }: { active: boolean }) {
           </div>
         </section>
 
+        {/* Viewer playback */}
+        <section>
+          <h2 className="text-sm font-semibold text-text mb-1">Viewer</h2>
+          <p className="mb-3 text-xs text-dim">Playback preferences used by Browse.</p>
+          <div className="overflow-hidden rounded-md border border-border bg-panel">
+            <div className="flex min-h-16 items-center gap-5 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-text">Default volume</div>
+                <div className="mt-0.5 text-xs text-dim">Applied whenever a video starts playing.</div>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={cfg.viewer_volume ?? 80}
+                onChange={event => set("viewer_volume", Number(event.target.value))}
+                className="w-36 accent-accent"
+              />
+              <span className="w-10 text-right font-mono text-xs text-dim">{cfg.viewer_volume ?? 80}%</span>
+            </div>
+            <label className="flex min-h-16 cursor-pointer items-center gap-5 border-t border-border px-4 py-3">
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium text-text">Loop videos</span>
+                <span className="mt-0.5 block text-xs text-dim">Replay the current video automatically.</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={cfg.viewer_loop ?? true}
+                onChange={event => set("viewer_loop", event.target.checked)}
+                className="h-4 w-4 accent-accent"
+              />
+            </label>
+          </div>
+        </section>
+
         {/* Download location */}
         <section>
           <h2 className="text-sm font-semibold text-text mb-3">{t("set.dl_location")}</h2>
@@ -137,6 +204,13 @@ export default function Settings({ active }: { active: boolean }) {
                 type="text"
                 value={cfg.download_path ?? ""}
                 onChange={e => set("download_path", e.target.value)}
+                onBlur={e => void saveDownloadPath(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  }
+                }}
                 placeholder="downloads"
                 className="flex-1 px-3 py-1.5 rounded bg-bg border border-border text-text text-sm
                            placeholder:text-dim focus:outline-none focus:border-accent"
@@ -144,7 +218,10 @@ export default function Settings({ active }: { active: boolean }) {
               <button
                 onClick={async () => {
                   const r = await browseFolder().catch(() => null);
-                  if (r?.path) set("download_path", r.path);
+                  if (r?.path) {
+                    set("download_path", r.path);
+                    await saveDownloadPath(r.path);
+                  }
                 }}
                 className="px-3 py-1.5 rounded text-sm border border-border text-dim hover:text-text hover:border-accent transition-colors shrink-0"
               >
@@ -161,6 +238,10 @@ export default function Settings({ active }: { active: boolean }) {
             <Field label={t("set.workers")}>
               <NumInput value={cfg.parallel_workers ?? 1} min={1} max={10}
                 onChange={v => set("parallel_workers", v)} />
+            </Field>
+            <Field label={t("set.account_workers")}>
+              <NumInput value={cfg.per_account_workers ?? 4} min={1} max={10}
+                onChange={v => set("per_account_workers", v)} />
             </Field>
             <Field label={t("set.sleep_user")}>
               <NumInput value={cfg.sleep_user ?? 2} min={0} step={0.5}
@@ -251,6 +332,7 @@ export default function Settings({ active }: { active: boolean }) {
         <div className="flex items-center gap-3">
           <button
             onClick={handleSave}
+            title="Save settings (Ctrl+S)"
             className="px-5 py-2 rounded text-sm font-medium bg-accent text-white
                        hover:opacity-90 transition-opacity"
           >

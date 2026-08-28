@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addCreator, addEntryFromLink, assignEntry, getAccounts,
-  removeCreator, removeEntry, renameCreator,
+  getViewerAccounts,
+  removeCreator, removeEntry, renameCreator, clearEntryArchive,
   avatarUrl, fetchAvatar,
-  getPosts, startCheck, getCheckStatus, openFile, redownloadFile,
+  getPosts, startCheck, getCheckStatus, openFile, openPostInViewer, redownloadFile,
   PLATFORM_META, type AccountsData, type Creator, type Entry,
-  type PostEntry, type CheckStatus,
+  type PostEntry, type CheckStatus, type ViewerAccount,
 } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
@@ -24,25 +25,33 @@ function displayName(entry: Entry): string {
 // ── Avatar image ──────────────────────────────────────────────────────────────
 
 function AvatarImg({ platform, accId }: { platform: string; accId: string }) {
-  const [ok, setOk]       = useState(true);
-  const [ready, setReady] = useState(false);
+  const [ok, setOk] = useState(true);
+  const [revision, setRevision] = useState("");
+  const refreshAttempted = useRef(false);
 
   useEffect(() => {
     setOk(true);
-    setReady(false);
-    fetchAvatar(platform, accId)
-      .catch(() => {})
-      .finally(() => setReady(true));
+    setRevision("");
+    refreshAttempted.current = false;
   }, [platform, accId]);
 
-  if (!ready || !ok) {
+  if (!ok) {
     return <PlatformChip platform={platform} className="w-20 h-20 p-4" />;
   }
   return (
     <img
-      src={`${avatarUrl(platform, accId)}?t=${Date.now()}`}
+      src={`${avatarUrl(platform, accId)}${revision ? `?t=${revision}` : ""}`}
       alt=""
-      onError={() => setOk(false)}
+      onError={() => {
+        if (refreshAttempted.current) {
+          setOk(false);
+          return;
+        }
+        refreshAttempted.current = true;
+        fetchAvatar(platform, accId)
+          .then(() => setRevision(String(Date.now())))
+          .catch(() => setOk(false));
+      }}
       className="w-20 h-20 rounded-full shrink-0 object-cover bg-panel"
     />
   );
@@ -95,6 +104,10 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
   const gone      = posts.filter(p => p.status === "gone").length;
   const ok        = posts.filter(p => p.status === "ok").length;
   const unchecked = posts.filter(p => p.status === "unchecked").length;
+  const missing   = posts.filter(p => p.status === "missing").length;
+  const localFiles = posts.reduce(
+    (total, post) => total + (post.files?.length ?? (post.file ? 1 : 0)), 0,
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
@@ -105,8 +118,11 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
           <div className="flex-1 min-w-0">
             <div className="font-semibold text-text text-sm">{dname}</div>
             <div className="text-xs text-dim mt-0.5">
-              {loading ? t("loading") : `${posts.length} ${t("posts.posts")}`}
+              {loading ? t("loading") : `${localFiles} ${t("posts.local_files")}`}
               {gone > 0 && <span className="ml-2 text-red-400">⚠ {gone} {t("posts.gone_count")}</span>}
+              {missing > 0 && (
+                <span className="ml-2 text-amber-400">! {missing} {t("posts.download_missing")}</span>
+              )}
               {unchecked > 0 && <span className="ml-2 text-dim">{unchecked} {t("posts.unchecked")}</span>}
               {ok > 0 && !gone && !unchecked && <span className="ml-2 text-green-400">{t("posts.all_ok")}</span>}
             </div>
@@ -147,24 +163,55 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
               <tbody>
                 {posts.map(p => (
                   <tr key={p.post_id}
-                    onDoubleClick={() => p.file && openFile(p.file).catch(() => {})}
-                    onContextMenu={e => { e.preventDefault(); setRowMenu({ x: e.clientX, y: e.clientY, p }); }}
+                    onDoubleClick={() => p.file && openPostInViewer(p.file)}
+                    onContextMenu={e => {
+                      if (p.status === "missing") return;
+                      e.preventDefault(); setRowMenu({ x: e.clientX, y: e.clientY, p });
+                    }}
                     className={`border-b border-border/30 transition-colors cursor-pointer ${p.status === "gone" ? "bg-red-900/10 hover:bg-red-900/20" : "hover:bg-hover"}`}
                   >
                     <td className="px-4 py-1.5 text-dim font-mono whitespace-nowrap">{p.date || "—"}</td>
                     <td className="px-4 py-1.5">
-                      {p.status === "gone" ? (
-                        <span className="px-1.5 py-0.5 rounded text-xs bg-red-700 text-white">{t("posts.gone_badge")}</span>
+                      {p.status === "missing" ? (
+                        <span
+                          className="text-amber-400 font-semibold"
+                          title="Post is available remotely but missing locally"
+                        >{t("posts.missing_badge")}</span>
+                      ) : p.status === "gone" ? (
+                        <span
+                          className="text-red-400 font-semibold"
+                          title="Remote post was deleted; the local file still exists"
+                        >{t("posts.gone_badge")}</span>
                       ) : p.status === "ok" ? (
-                        <span className="text-green-400">✓</span>
+                        <span
+                          className="text-green-400 font-semibold"
+                          title="Local file was found on the remote platform"
+                        >✓</span>
                       ) : (
-                        <span className="text-dim">—</span>
+                        <span className="text-dim" title="Local file has not been verified remotely">—</span>
                       )}
                     </td>
-                    <td className={`px-4 py-1.5 font-mono truncate max-w-xs ${
+                    <td className={`px-4 py-1.5 font-mono max-w-xs ${
                       p.status === "gone" ? "text-red-400" : "text-text"
-                    }`} title={p.file}>
-                      {p.file || p.post_id}
+                    }`} title={(p.files?.length ? p.files : [p.file]).filter(Boolean).join("\n")}>
+                      {p.files?.length ? (
+                        <div className="flex flex-col gap-1 py-0.5">
+                          {p.files.map(file => (
+                            <button
+                              key={file}
+                              type="button"
+                              onDoubleClick={event => {
+                                event.stopPropagation();
+                                openPostInViewer(file);
+                              }}
+                              className="block max-w-full truncate text-left hover:underline"
+                              title={file}
+                            >
+                              {file}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (p.expected_name || p.post_id)}
                     </td>
                   </tr>
                 ))}
@@ -211,14 +258,29 @@ function PostsModal({ entry, onClose }: { entry: Entry; onClose: () => void }) {
 
 // ── Entry row ─────────────────────────────────────────────────────────────────
 function EntryRow({
-  entry, creators, onRefresh,
-}: { entry: Entry; creators: Creator[]; onRefresh: () => void }) {
+  entry, creators, archive, onRefresh,
+}: { entry: Entry; creators: Creator[]; archive?: ViewerAccount; onRefresh: () => void }) {
   const { t } = useLang();
   const [menu, setMenu]           = useState(false);
   const [menuPos, setMenuPos]     = useState({ x: 0, y: 0 });
   const [showPosts, setShowPosts] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [archiveNotice, setArchiveNotice] = useState("");
+  const [postAlerts, setPostAlerts] = useState({ missing: 0, gone: 0 });
   const aid   = accountId(entry);
   const dname = displayName(entry);
+
+  const loadPostAlerts = useCallback(() => {
+    getPosts(entry.platform, aid)
+      .then(posts => setPostAlerts({
+        missing: posts.filter(post => post.status === "missing").length,
+        gone: posts.filter(post => post.status === "gone").length,
+      }))
+      .catch(() => {});
+  }, [entry.platform, aid]);
+
+  useEffect(() => { loadPostAlerts(); }, [loadPostAlerts]);
 
   const moveTargets = creators.filter(c => c.id !== entry.creator_id);
   const moveSubmenu: MenuItem[] = [
@@ -236,6 +298,13 @@ function EntryRow({
 
   const menuItems: MenuItem[] = [
     { label: t("ctx.posts"),       onClick: () => setShowPosts(true) },
+    { label: "Open in Viewer", onClick: () => window.dispatchEvent(
+      new CustomEvent("archiver:open-viewer", { detail: `${entry.platform}:${aid}` })
+    ) },
+    {
+      label: t("ctx.clear_archive"),
+      onClick: () => setConfirmArchive(true),
+    },
     { label: "", divider: true,    onClick: () => {} },
     { label: t("ctx.move_to"),     submenu: moveSubmenu, onClick: () => {} },
     { label: "", divider: true,    onClick: () => {} },
@@ -257,8 +326,41 @@ function EntryRow({
         <AvatarImg platform={entry.platform} accId={aid} />
         <div className="flex-1 min-w-0">
           <div className="text-sm text-text truncate font-medium">{dname}</div>
-          <div className="text-xs text-dim mt-0.5">{entry.platform}</div>
+          <div className="flex flex-wrap items-center gap-x-2 text-xs text-dim mt-0.5">
+            <span>{entry.platform}</span>
+            <span className="text-emerald-400">Tracked</span>
+            {archive ? (
+              <span>{archive.posts.toLocaleString()} archived posts</span>
+            ) : (
+              <span className="text-dim/70">No local archive</span>
+            )}
+            {postAlerts.gone > 0 && (
+              <span className="text-red-400">⚠ {postAlerts.gone} {t("posts.gone_count")}</span>
+            )}
+            {postAlerts.missing > 0 && (
+              <span className="text-amber-400">! {postAlerts.missing} {t("posts.download_missing")}</span>
+            )}
+          </div>
         </div>
+        <button
+          onClick={event => { event.stopPropagation(); setShowPosts(true); }}
+          className="rounded border border-border px-2.5 py-1 text-xs text-dim hover:bg-hover hover:text-text"
+        >
+          {t("ctx.posts")}
+        </button>
+        {archive && (
+          <button
+            onClick={event => {
+              event.stopPropagation();
+              window.dispatchEvent(new CustomEvent(
+                "archiver:open-viewer", { detail: `${entry.platform}:${aid}` }
+              ));
+            }}
+            className="rounded border border-border px-2.5 py-1 text-xs text-accent opacity-70 hover:bg-hover hover:opacity-100"
+          >
+            Viewer
+          </button>
+        )}
         <button
           onClick={e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); openAt(r.left, r.bottom + 4); }}
           className="opacity-0 group-hover:opacity-100 text-dim hover:text-text transition-opacity text-sm px-1"
@@ -267,15 +369,58 @@ function EntryRow({
         </button>
         {menu && <ContextMenu items={menuItems} onClose={() => setMenu(false)} x={menuPos.x} y={menuPos.y} />}
       </div>
-      {showPosts && <PostsModal entry={entry} onClose={() => setShowPosts(false)} />}
+      {showPosts && <PostsModal entry={entry} onClose={() => { setShowPosts(false); loadPostAlerts(); }} />}
+      {archiveNotice && (
+        <div className="fixed right-5 bottom-5 z-[250] max-w-sm rounded-md border border-border bg-panel px-4 py-3 text-xs text-text shadow-xl">
+          {archiveNotice}
+        </div>
+      )}
+      {confirmArchive && (
+        <div className="fixed inset-0 z-[240] flex items-center justify-center bg-black/50">
+          <div className="w-96 rounded-lg border border-border bg-panel p-5 shadow-xl">
+            <h2 className="mb-2 font-semibold text-text">{t("ctx.clear_archive_title")}</h2>
+            <p className="mb-1 text-sm text-text">{dname}</p>
+            <p className="mb-5 text-xs text-dim">{t("ctx.clear_archive_confirm")}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                disabled={archiveBusy}
+                onClick={() => setConfirmArchive(false)}
+                className="rounded px-4 py-1.5 text-sm text-dim hover:bg-hover hover:text-text disabled:opacity-50">
+                {t("cancel")}
+              </button>
+              <button
+                disabled={archiveBusy}
+                onClick={async () => {
+                  setArchiveBusy(true);
+                  try {
+                    const result = await clearEntryArchive(entry.id);
+                    setConfirmArchive(false);
+                    setArchiveNotice(t(
+                      result.cleared ? "ctx.clear_archive_done" : "ctx.clear_archive_empty"
+                    ));
+                    setTimeout(() => setArchiveNotice(""), 3000);
+                  } catch (error: unknown) {
+                    setArchiveNotice(error instanceof Error ? error.message : String(error));
+                    setTimeout(() => setArchiveNotice(""), 4000);
+                  } finally {
+                    setArchiveBusy(false);
+                  }
+                }}
+                className="rounded bg-red-600 px-4 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-50">
+                {archiveBusy ? "…" : t("ctx.clear_archive_action")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
 // ── Creator group ─────────────────────────────────────────────────────────────
 function CreatorGroup({
-  creator, entries, allCreators, onRefresh,
-}: { creator: Creator; entries: Entry[]; allCreators: Creator[]; onRefresh: () => void }) {
+  creator, entries, allCreators, archiveByKey, onRefresh,
+}: { creator: Creator; entries: Entry[]; allCreators: Creator[]; archiveByKey: Map<string, ViewerAccount>; onRefresh: () => void }) {
   const { t } = useLang();
   const [menu, setMenu]         = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -330,7 +475,8 @@ function CreatorGroup({
           <p className="px-3 py-3 text-xs text-dim italic">{t("acc.no_entries")}</p>
         ) : (
           entries.map(e => (
-            <EntryRow key={e.id} entry={e} creators={allCreators} onRefresh={onRefresh} />
+            <EntryRow key={e.id} entry={e} creators={allCreators}
+              archive={archiveByKey.get(`${e.platform}:${accountId(e)}`)} onRefresh={onRefresh} />
           ))
         )}
       </div>
@@ -347,6 +493,16 @@ function AddEntryModal({
   const [url, setUrl]     = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy]   = useState(false);
+  const [groups, setGroups] = useState<Creator[]>([]);
+  const [choosingGroup, setChoosingGroup] = useState(false);
+  const [added, setAdded] = useState<{
+    id: string; platform: string; handle: string; display: string;
+  } | null>(null);
+
+  const finish = () => {
+    onAdd();
+    onClose();
+  };
 
   const submit = async () => {
     const u = url.trim();
@@ -354,9 +510,10 @@ function AddEntryModal({
     setBusy(true);
     setError("");
     try {
-      await addEntryFromLink(u);
-      onAdd();
-      onClose();
+      const entry = await addEntryFromLink(u);
+      setAdded(entry);
+      const accounts = await getAccounts();
+      setGroups(accounts.creators);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -369,28 +526,107 @@ function AddEntryModal({
       <div className="bg-panel border border-border rounded-lg w-96 p-5 shadow-xl">
         <h2 className="font-semibold text-text mb-4">{t("entry.title")}</h2>
 
-        <label className="block text-xs text-dim mb-1">{t("entry.handle")}</label>
-        <input
-          autoFocus
-          value={url}
-          onChange={e => setUrl(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && !busy && submit()}
-          placeholder={t("entry.link_hint")}
-          className="w-full px-3 py-1.5 rounded bg-bg border border-border text-text text-sm
-                     placeholder:text-dim focus:outline-none focus:border-accent mb-4"
-        />
+        {added && choosingGroup ? (
+          <div className="mb-4">
+            <p className="text-sm text-text mb-2">
+              {t("entry.choose_group")}
+            </p>
+            <div className="max-h-60 overflow-y-auto border border-border rounded-md">
+              {groups.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-dim">
+                  {t("entry.no_groups")}
+                </p>
+              ) : groups.map(group => (
+                <button
+                  key={group.id}
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    setError("");
+                    try {
+                      await assignEntry(added.id, group.id);
+                      finish();
+                    } catch (e: unknown) {
+                      setError(e instanceof Error ? e.message : String(e));
+                      setBusy(false);
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-left text-sm text-text hover:bg-hover border-b border-border/40 last:border-b-0 disabled:opacity-50"
+                >
+                  {group.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : added ? (
+          <div className="mb-4">
+            <p className="text-sm text-text mb-2">
+              {t("entry.group_prompt").replace("{name}", added.display)}
+            </p>
+            <p className="text-xs text-dim">{t("entry.group_hint")}</p>
+          </div>
+        ) : (
+          <>
+            <label className="block text-xs text-dim mb-1">{t("entry.handle")}</label>
+            <input
+              autoFocus
+              value={url}
+              onChange={e => setUrl(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && !busy && submit()}
+              placeholder={t("entry.link_hint")}
+              className="w-full px-3 py-1.5 rounded bg-bg border border-border text-text text-sm
+                         placeholder:text-dim focus:outline-none focus:border-accent mb-4"
+            />
+          </>
+        )}
 
         {error && <p className="text-red-400 text-xs mb-3">{error}</p>}
 
         <div className="flex justify-end gap-2">
-          <button onClick={onClose}
-            className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors">
-            {t("cancel")}
-          </button>
-          <button onClick={submit} disabled={busy}
-            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
-            {busy ? "…" : t("entry.add")}
-          </button>
+          {added && choosingGroup ? (
+            <button
+              onClick={() => setChoosingGroup(false)}
+              disabled={busy}
+              className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors disabled:opacity-50"
+            >
+              {t("back")}
+            </button>
+          ) : added ? (
+            <>
+              <button onClick={() => setChoosingGroup(true)} disabled={busy}
+                className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors disabled:opacity-50">
+                {t("entry.choose_existing")}
+              </button>
+              <button
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    const creator = await addCreator(added.display);
+                    await assignEntry(added.id, creator.id);
+                    finish();
+                  } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : String(e));
+                    setBusy(false);
+                  }
+                }}
+                className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+                {busy ? "…" : t("entry.create_group")}
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={onClose}
+                className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors">
+                {t("cancel")}
+              </button>
+              <button onClick={submit} disabled={busy}
+                className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+                {busy ? "…" : t("entry.add")}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -404,12 +640,25 @@ export default function Accounts({ active }: { active: boolean }) {
   const [showAdd, setShowAdd]         = useState(false);
   const [newGroup, setNewGroup]       = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
+  const [search, setSearch]           = useState("");
+  const [archiveAccounts, setArchiveAccounts] = useState<ViewerAccount[]>([]);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
-    try { setData(await getAccounts()); } catch { /* ignore */ }
+    try {
+      setData(await getAccounts());
+    } catch { /* ignore */ }
+    try { setArchiveAccounts((await getViewerAccounts()).accounts); } catch { /* ignore */ }
   }, []);
 
   useEffect(() => { if (active) refresh(); }, [active, refresh]);
+
+  useEffect(() => {
+    if (!active) return;
+    const focusSearch = () => searchRef.current?.focus();
+    window.addEventListener("archiver:focus-search", focusSearch);
+    return () => window.removeEventListener("archiver:focus-search", focusSearch);
+  }, [active]);
 
   const grouped = new Map<string | null, Entry[]>();
   grouped.set(null, []);
@@ -421,6 +670,31 @@ export default function Accounts({ active }: { active: boolean }) {
   });
 
   const unassigned = grouped.get(null) ?? [];
+  const query = search.trim().toLocaleLowerCase();
+  const entryMatches = (entry: Entry) => !query || [
+    displayName(entry), accountId(entry), entry.handle, entry.platform,
+  ].some(value => value.toLocaleLowerCase().includes(query));
+  const visibleUnassigned = unassigned.filter(entryMatches);
+  const visibleGroups = data.creators.map(creator => {
+    const entries = grouped.get(creator.id) ?? [];
+    const groupMatches = query && creator.name.toLocaleLowerCase().includes(query);
+    return {
+      creator,
+      entries: groupMatches ? entries : entries.filter(entryMatches),
+    };
+  }).filter(group => !query || group.entries.length > 0);
+  const visibleAccountCount = visibleUnassigned.length
+    + visibleGroups.reduce((total, group) => total + group.entries.length, 0);
+  const trackedKeys = new Set(data.entries.map(entry => `${entry.platform}:${accountId(entry)}`));
+  const archiveByKey = new Map(
+    archiveAccounts.map(account => [`${account.platform}:${account.account_id}`, account] as const)
+  );
+  const archivedOnly = archiveAccounts.filter(account => {
+    if (trackedKeys.has(`${account.platform}:${account.account_id}`)) return false;
+    if (!query) return true;
+    return [account.account, account.account_id, account.platform, account.group]
+      .some(value => value.toLocaleLowerCase().includes(query));
+  });
 
   const createGroup = async () => {
     const n = newGroup.trim();
@@ -453,32 +727,73 @@ export default function Accounts({ active }: { active: boolean }) {
               className="text-xs text-dim hover:text-text transition-colors">{t("acc.add_group")}</button>
           )}
         </div>
-        <button onClick={() => setShowAdd(true)}
-          className="px-3 py-1.5 rounded text-xs bg-accent text-white hover:opacity-90 transition-opacity">
-          {t("acc.add_account")}
-        </button>
+        <div className="flex items-center gap-2">
+          <input
+            ref={searchRef}
+            type="search"
+            value={search}
+            onChange={event => setSearch(event.target.value)}
+            placeholder={t("acc.search")}
+            className="w-48 rounded border border-border bg-panel px-2.5 py-1.5 text-xs text-text placeholder:text-dim focus:border-accent focus:outline-none"
+          />
+          <button onClick={() => setShowAdd(true)}
+            className="px-3 py-1.5 rounded text-xs bg-accent text-white hover:opacity-90 transition-opacity">
+            {t("acc.add_account")}
+          </button>
+        </div>
       </div>
 
       {/* Scrollable list */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
-        {data.entries.length === 0 ? (
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4">
+        {data.entries.length === 0 && archiveAccounts.length === 0 ? (
           <p className="text-dim text-sm text-center mt-12">{t("acc.empty")}</p>
+        ) : query && visibleAccountCount === 0 && archivedOnly.length === 0 ? (
+          <p className="text-dim text-sm text-center mt-12">{t("acc.no_match")}</p>
         ) : (
           <>
-            {unassigned.length > 0 && (
+            {visibleUnassigned.length > 0 && (
               <div className="border border-border rounded-md overflow-hidden mb-3">
                 <div className="px-3 py-2 bg-panel text-xs text-dim font-semibold">{t("acc.unassigned")}</div>
                 <div className="bg-bg divide-y divide-border/50">
-                  {unassigned.map(e => (
-                    <EntryRow key={e.id} entry={e} creators={data.creators} onRefresh={refresh} />
+                  {visibleUnassigned.map(e => (
+                    <EntryRow key={e.id} entry={e} creators={data.creators}
+                      archive={archiveByKey.get(`${e.platform}:${accountId(e)}`)} onRefresh={refresh} />
                   ))}
                 </div>
               </div>
             )}
-            {data.creators.map(c => (
-              <CreatorGroup key={c.id} creator={c}
-                entries={grouped.get(c.id) ?? []} allCreators={data.creators} onRefresh={refresh} />
+            {visibleGroups.map(({ creator, entries }) => (
+              <CreatorGroup key={creator.id} creator={creator}
+                entries={entries} allCreators={data.creators} archiveByKey={archiveByKey} onRefresh={refresh} />
             ))}
+            {archivedOnly.length > 0 && (
+              <div className="border border-border rounded-md overflow-hidden mb-3">
+                <div className="px-3 py-2 bg-panel text-xs text-dim font-semibold">
+                  Archived only · {archivedOnly.length}
+                </div>
+                <div className="bg-bg divide-y divide-border/50">
+                  {archivedOnly.map(account => {
+                    const base = ((window as unknown as Record<string, unknown>).__apiBase as string) || "";
+                    return (
+                      <button key={`${account.platform}:${account.account_id}`}
+                        onClick={() => window.dispatchEvent(new CustomEvent(
+                          "archiver:open-viewer", { detail: `${account.platform}:${account.account_id}` }
+                        ))}
+                        className="flex w-full items-center gap-3 px-3 py-3 text-left hover:bg-hover transition-colors">
+                        <img src={`${base}/viewer/${account.avatar}`} alt="" className="h-9 w-9 rounded-full object-cover" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium text-text">{account.account}</span>
+                          <span className="block text-xs text-dim">
+                            {account.platform} · {account.posts} posts{account.group ? ` · ${account.group}` : ""}
+                          </span>
+                        </span>
+                        <span className="text-xs text-accent">Open in Viewer</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

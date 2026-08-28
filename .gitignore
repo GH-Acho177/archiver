@@ -6,13 +6,18 @@ build.bat
 # ── Downloaded binaries (users download these separately) ─────────────────────
 packaging/gallery-dl.exe
 packaging/yt-dlp.exe
+packaging/ffmpeg.exe
+packaging/ffprobe.exe
 
 # ── Personal config / runtime data ────────────────────────────────────────────
 config/x_cookies.txt
 config/douyin_cookies.txt
+config/douyin_edge_profile/
+config/xiaohongshu_cookies.txt
 config/bilibili_cookies.txt
 config/x_users.txt
 config/douyin_users.txt
+config/xiaohongshu_users.txt
 config/bilibili_users.txt
 config/x_downloaded.db
 config/douyin_users.db
@@ -24,6 +29,9 @@ config/settings.json
 config/download_path.txt
 config/lang.txt
 config/post_index.json
+config/viewer.db
+config/viewer.db-shm
+config/viewer.db-wal
 config/avatars/
 config/archives/
 config/creator_store.json
@@ -35,7 +43,23 @@ downloads/
 # ── UI tooling / runtime ──────────────────────────────────────────────────────
 node_modules/
 .webview2/
+.webview2-viewer/
+.webview2-digiviewer/
+.uv-cache/
 ui/dist/.index_app.html
+ui/debug.log
+
+# ── Separate local DigiViewer project ────────────────────────────────────────
+digiviewer/
+run_digiviewer.py
+config/digiviewer.db
+config/digiviewer_previews/
+
+# ── Additional local runtime state ───────────────────────────────────────────
+config/creators.json
+config/creators_test.json
+config/douyin_edge_profile_v2/
+douyin_users.db
 
 # ── IDE / tooling ──────────────────────────────────────────────────────────────
 .idea/

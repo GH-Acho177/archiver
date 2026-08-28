@@ -5,14 +5,14 @@
 /* ── Theme tokens (RGB channels — required for Tailwind opacity modifiers) ── */
 
 :root, [data-theme="dark"] {
-  --color-bg:      43  43  43;   /* #2b2b2b */
-  --color-panel:   60  63  65;   /* #3c3f41 */
-  --color-hover:   75  75  75;   /* #4b4b4b */
-  --color-border:  81  81  81;   /* #515151 */
-  --color-text:    187 187 187;  /* #bbbbbb */
-  --color-dim:     107 107 107;  /* #6b6b6b */
-  --color-accent:  74  155 202;  /* #4a9bca */
-  --color-log-bg:  31  35  39;   /* #1f2327 */
+  --color-bg:      31  34  38;
+  --color-panel:   40  44  49;
+  --color-hover:   52  57  63;
+  --color-border:  64  70  77;
+  --color-text:    226 229 233;
+  --color-dim:     151 158 166;
+  --color-accent:  72  148 211;
+  --color-log-bg:  23  26  30;
 
   --scrollbar-thumb: #515151;
   --scrollbar-hover: #6b6b6b;
@@ -20,13 +20,13 @@
 }
 
 [data-theme="light"] {
-  --color-bg:      232 232 232;  /* #e8e8e8 */
+  --color-bg:      242 244 247;
   --color-panel:   255 255 255;  /* #ffffff */
-  --color-hover:   240 240 240;  /* #f0f0f0 */
-  --color-border:  208 208 208;  /* #d0d0d0 */
-  --color-text:    26  26  26;   /* #1a1a1a */
-  --color-dim:     118 118 118;  /* #767676 */
-  --color-accent:  30  110 181;  /* #1e6eb5 */
+  --color-hover:   235 239 244;
+  --color-border:  207 213 221;
+  --color-text:    30  35  41;
+  --color-dim:     102 111 122;
+  --color-accent:  35  112 181;
   --color-log-bg:  248 248 248;  /* #f8f8f8 */
 
   --scrollbar-thumb: #d0d0d0;
@@ -44,7 +44,65 @@ html, body, #root {
   color: rgb(var(--color-text));
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Shared desktop controls */
+button, input, select, textarea { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+button:disabled, input:disabled, select:disabled, textarea:disabled {
+  cursor: not-allowed !important;
+}
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid rgb(var(--color-accent));
+  outline-offset: 2px;
+}
+input, select, textarea {
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+input::placeholder, textarea::placeholder { color: rgb(var(--color-dim) / .8); }
+input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled) {
+  border-color: rgb(var(--color-dim) / .8);
+}
+input:focus, select:focus, textarea:focus {
+  border-color: rgb(var(--color-accent)) !important;
+  box-shadow: 0 0 0 3px rgb(var(--color-accent) / .16);
+  outline: none;
+}
+
+/* Dense information surfaces stay readable without becoming web-dashboard cards. */
+table { font-variant-numeric: tabular-nums; }
+thead th {
+  height: 36px;
+  color: rgb(var(--color-dim));
+  font-size: 10px;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+tbody tr { transition: background-color 120ms ease; }
+tbody td { vertical-align: middle; }
+
+/* Existing confirmation dialogs share a restrained desktop surface. */
+.fixed.inset-0.z-50 > .bg-panel {
+  border-radius: 10px;
+  border-color: rgb(var(--color-border));
+  box-shadow: 0 18px 55px rgb(0 0 0 / .32);
+}
+
+@media (max-width: 900px) {
+  html, body, #root { font-size: 12px; }
+  thead th { letter-spacing: .035em; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────────────────── */
@@ -61,3 +119,62 @@ html, body, #root {
 .log-line-success { color: #6aaf6a; }
 .log-line-dim     { color: rgb(var(--color-border)); }
 .log-line-info    { color: rgb(var(--color-accent)); }
+
+/* Progress cards */
+@keyframes progress-card-in {
+  from { opacity: 0; transform: translateX(-10px) scale(.98); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes progress-card-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--color-accent) / 0); }
+  50%      { box-shadow: 0 0 0 2px rgb(var(--color-accent) / .12); }
+}
+
+@keyframes progress-slide {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(310%); }
+}
+
+@keyframes progress-complete {
+  from { transform: scaleX(.25); opacity: .45; transform-origin: left; }
+  to   { transform: scaleX(1); opacity: 1; transform-origin: left; }
+}
+
+.progress-card {
+  animation: progress-card-in 220ms ease-out both;
+  transition: border-color 180ms ease, background-color 180ms ease,
+              box-shadow 180ms ease, transform 180ms ease;
+}
+
+.progress-card:hover {
+  background-color: rgb(var(--color-panel) / .72);
+  transform: translateY(-1px);
+}
+
+.progress-card-active {
+  animation: progress-card-in 220ms ease-out both,
+             progress-card-breathe 1.8s ease-in-out 220ms infinite;
+}
+
+.progress-card-finished {
+  background-color: rgb(var(--color-panel) / .36);
+}
+
+.progress-indeterminate {
+  animation: progress-slide 1.15s ease-in-out infinite;
+}
+
+.progress-complete {
+  animation: progress-complete 280ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-card,
+  .progress-card-active,
+  .progress-indeterminate,
+  .progress-complete {
+    animation: none;
+    transition: none;
+  }
+}

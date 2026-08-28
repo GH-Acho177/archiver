@@ -1,5 +1,5 @@
 ﻿import { useEffect, useRef, useState, useCallback } from "react";
-import { getStatus, startSync, stopSync, downloadUrl, getSettings, saveSettings, getHistory, getAccounts, openDownloadsFolder, openFile, redownloadFile, avatarUrl, fetchAvatar, type Status, type HistoryEntry, type HistoryUser, type AccountsData } from "../api";
+import { getStatus, getLogs, startSync, stopSync, startMaintenance, downloadUrl, getSettings, saveSettings, getHistory, getAccounts, openDownloadsFolder, openFile, openPostInViewer, redownloadFile, avatarUrl, fetchAvatar, type Status, type HistoryEntry, type HistoryUser, type AccountsData } from "../api";
 import { PlatformChip } from "../components/PlatformChip";
 import { ContextMenu } from "../components/ContextMenu";
 import { useLang } from "../i18n";
@@ -58,32 +58,60 @@ function DownloadModal({ onClose }: { onClose: () => void }) {
 function classifyLine(line: string): string {
   if (/\[error\]|ERROR/i.test(line))        return "log-line-error";
   if (/\[warning\]|WARNING|⚠/i.test(line))  return "log-line-warning";
-  if (/✓|→ Up to date/.test(line))          return "log-line-success";
-  if (/^─+$/.test(line.trim()))              return "log-line-dim";
-  if (/^(Mode|From|Workers|Platform|Users|Interval)\s*:/.test(line)) return "log-line-info";
+  if (/✓|VERIFIED|finished|Finished|→ Up to date/.test(line)) return "log-line-success";
+  if (/UNVERIFIED|INCOMPLETE|\[verify\]/i.test(line)) return "log-line-warning";
+  if (/^(?:─+|\+-[-+]+\+)$/.test(line.trim())) return "log-line-dim";
+  if (/^(Mode|From|Workers|Per acct|Platform|Users|Interval)\s*:/.test(line)
+      || /^(Sync|Maintenance) summary$/.test(line)
+      || /^\|\s*Account\s*\|/.test(line)) return "log-line-info";
   return "";
 }
 
 function simplifyLines(lines: string[]): string[] {
   const out: string[] = [];
   for (const line of lines) {
+    const important =
+      /\[error\]|ERROR|\[warning\]|WARNING|UNVERIFIED|INCOMPLETE|\[verify\]/i.test(line)
+      || /^\|/.test(line)
+      || /^\+-[-+]+\+$/.test(line)
+      || /^(Mode|From|Workers|Per acct|Platform|URL|Resolved)\s*:/.test(line)
+      || /^(Sync|Maintenance) summary$/.test(line)
+      || /^Maintenance(:| finished)/.test(line)
+      || /^→\s/.test(line)
+      || /^\s*\[(disk|corrupt|dedupe|naming|merge|archive)\]/i.test(line)
+      || /^(Repaired|Added|Removed|Downloaded)\s*:/.test(line)
+      || /^\[index-scan\].*Done/.test(line);
+    if (important) {
+      if (out[out.length - 1] !== line) out.push(line);
+      continue;
+    }
     if (/^\[download\]/.test(line)) continue;
     if (/^\[Merger\]|^\[Fixup|^Deleting original file/.test(line)) continue;
     if (/^\[(BiliBili|BilibiliSpaceVideo|youtube|Twitter|twitch|TikTok)\]/i.test(line)) continue;
-    if (/has already been downloaded/.test(line)) continue;
+    if (/has already been (downloaded|recorded)/.test(line)) continue;
     if (/^\[info\]/.test(line)) continue;
     if (/Format\(s\).+missing/.test(line)) continue;
     if (/[█░▓]{2,}/.test(line)) continue;
     if (/\d+%\|/.test(line)) continue;
-    out.push(line);
+    if (/^\s*INFO\s+/.test(line)) continue;
+    if (/^\s*(处理第|等待 \d+ 秒|第.+页没有找到作品)/.test(line)) continue;
+    // Keep ordinary useful messages. The rules above remove known verbose
+    // downloader noise; dropping the remaining lines made Simple mode blank
+    // whenever an account had no warning or summary line yet.
+    if (out[out.length - 1] !== line) out.push(line);
   }
   return out;
 }
 
+type AccountLogLine = {
+  text: string;
+  accountKey: string | null;
+};
+
 const DEFAULT_STATUS: Status = {
   running: false, status: "Idle", mode: "update",
   from_days: 0, tracking: 0, last_sync: "—", version: "",
-  total_downloads: 0, scheduler_active: false, next_sync_at: 0,
+  total_downloads: 0, scheduler_active: false, next_sync_at: 0, progress: [],
 };
 
 // ── Start sync modal ──────────────────────────────────────────────────────────
@@ -96,10 +124,26 @@ function StartSyncModal({ mode, fromDays, onClose, onStart }: {
 }) {
   const { t } = useLang();
   const [data, setData]         = useState<AccountsData | null>(null);
-  const [selected, setSelected] = useState<string[] | null>(null);
+  const [selected, setSelected] = useState<string[] | null>(() => {
+    try {
+      const saved = localStorage.getItem("archiver:last-sync-targets");
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
 
   useEffect(() => {
-    getAccounts().then(setData).catch(() => {});
+    getAccounts().then(accounts => {
+      setData(accounts);
+      setSelected(current => {
+        if (current === null) return null;
+        const valid = new Set([
+          ...accounts.creators.map(creator => creator.id),
+          ...(accounts.entries.some(entry => !entry.creator_id) ? ["__unassigned__"] : []),
+        ]);
+        const available = current.filter(id => valid.has(id));
+        return available.length === valid.size ? null : available;
+      });
+    }).catch(() => {});
   }, []);
 
   const hasUnassigned = data?.entries.some(e => !e.creator_id) ?? false;
@@ -162,8 +206,108 @@ function StartSyncModal({ mode, fromDays, onClose, onStart }: {
             className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors">
             {t("cancel")}
           </button>
-          <button onClick={() => { onClose(); onStart(selected); }}
-            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity">
+          <button
+            disabled={selected?.length === 0}
+            onClick={() => {
+              localStorage.setItem("archiver:last-sync-targets", JSON.stringify(selected));
+              onClose();
+              onStart(selected);
+            }}
+            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-40">
+            {t("sync.start")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StartMaintenanceModal({ onClose, onStart }: {
+  onClose: () => void;
+  onStart: (creatorIds: string[] | null) => void;
+}) {
+  const { t } = useLang();
+  const [data, setData] = useState<AccountsData | null>(null);
+  const [selected, setSelected] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    getAccounts().then(setData).catch(() => {});
+  }, []);
+
+  const groups = data?.creators ?? [];
+  const toggle = (id: string) => {
+    const allIds = groups.map(group => group.id);
+    const current = selected ?? allIds;
+    const next = current.includes(id)
+      ? current.filter(value => value !== id)
+      : [...current, id];
+    setSelected(
+      next.length === 0 ? []
+        : next.length === allIds.length ? null
+        : next
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-panel border border-border rounded-lg w-96 p-5 shadow-xl">
+        <h2 className="font-semibold text-text mb-4">
+          {t("maintenance.title")}
+        </h2>
+        <div className="border border-border rounded-md overflow-hidden mb-4">
+          <button
+            onClick={() => setSelected(selected === null ? [] : null)}
+            className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center gap-2 ${
+              selected === null ? "bg-accent/10 text-accent" : "text-text hover:bg-hover"
+            }`}
+          >
+            <span className={`w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center text-xs ${
+              selected === null ? "bg-accent border-accent text-white" : "border-border"
+            }`}>{selected === null && "✓"}</span>
+            {t("maintenance.all_groups")}
+          </button>
+          <div className="max-h-72 overflow-y-auto border-t border-border">
+            {data === null ? (
+              <p className="text-xs text-dim px-3 py-2">{t("loading")}</p>
+            ) : groups.length === 0 ? (
+              <p className="text-xs text-dim px-3 py-2">
+                {t("maintenance.no_groups")}
+              </p>
+            ) : groups.map(group => {
+              const checked = selected === null || selected.includes(group.id);
+              const accountCount = data!.entries.filter(
+                entry => entry.creator_id === group.id
+              ).length;
+              return (
+                <button
+                  key={group.id}
+                  onClick={() => toggle(group.id)}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-hover transition-colors flex items-center gap-2 border-b border-border/40 last:border-b-0"
+                >
+                  <span className={`w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center text-xs ${
+                    checked ? "bg-accent border-accent text-white" : "border-border"
+                  }`}>{checked && "✓"}</span>
+                  <span className="truncate">{group.name}</span>
+                  <span className="ml-auto text-[10px] text-dim">
+                    {accountCount} {t("dash.accounts")}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded text-sm text-dim hover:text-text hover:bg-hover transition-colors"
+          >
+            {t("cancel")}
+          </button>
+          <button
+            disabled={groups.length === 0 || selected?.length === 0}
+            onClick={() => { onClose(); onStart(selected); }}
+            className="px-4 py-1.5 rounded text-sm bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-40"
+          >
             {t("sync.start")}
           </button>
         </div>
@@ -228,7 +372,7 @@ function UserRow({ user }: { user: HistoryUser }) {
             const path = user.folder + "\\" + f;
             return (
               <div key={i}
-                onDoubleClick={() => openFile(path).catch(() => {})}
+                onDoubleClick={() => openPostInViewer(path)}
                 onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, path }); }}
                 className="font-mono text-xs text-dim truncate pl-8 rounded px-1 cursor-pointer hover:text-text hover:bg-hover transition-colors"
               >{f}</div>
@@ -295,19 +439,51 @@ export default function Dashboard({ active }: { active: boolean }) {
   const [status, setStatus]     = useState<Status>(DEFAULT_STATUS);
   const [mode, setMode]         = useState<"update" | "full">("update");
   const [fromDays, setFromDays] = useState(0);
-  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logLines, setLogLines] = useState<AccountLogLine[]>([]);
+  const [selectedLogKey, setSelectedLogKey] = useState<string | null>(null);
   const [error, setError]       = useState("");
   const [showDl, setShowDl]     = useState(false);
   const [simpleLog, setSimpleLog] = useState(true);
+  const [logQuery, setLogQuery] = useState("");
+  const [wrapLog, setWrapLog] = useState(false);
+  const [followLog, setFollowLog] = useState(true);
+  const [copiedLog, setCopiedLog] = useState(false);
   const [autoSync, setAutoSync] = useState(false);
   const [showSyncModal, setShowSyncModal]   = useState(false);
+  const [showMaintenanceModal, setShowMaintenanceModal] = useState(false);
   const [activeTab, setActiveTab]           = useState<"log" | "history">("log");
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [countdown, setCountdown]           = useState("");
+  const [showCompletedProgress, setShowCompletedProgress] = useState(false);
+  const [errorTooltip, setErrorTooltip] = useState<{
+    text: string; x: number; y: number;
+  } | null>(null);
   const logRef  = useRef<HTMLDivElement>(null);
-  const wsRef   = useRef<WebSocket | null>(null);
-  const bufRef  = useRef("");
+  const logSearchRef = useRef<HTMLInputElement>(null);
+  const logBuffersRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    if (!active) return;
+    const focusSearch = () => {
+      setActiveTab("log");
+      requestAnimationFrame(() => logSearchRef.current?.focus());
+    };
+    window.addEventListener("archiver:focus-search", focusSearch);
+    return () => window.removeEventListener("archiver:focus-search", focusSearch);
+  }, [active]);
+
+  useEffect(() => {
+    if (!active) return;
+    const openSync = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "s" && !status.running) {
+        event.preventDefault();
+        setShowSyncModal(true);
+      }
+    };
+    window.addEventListener("keydown", openSync);
+    return () => window.removeEventListener("keydown", openSync);
+  }, [active, status.running]);
 
   useEffect(() => {
     getSettings().then(s => {
@@ -324,51 +500,54 @@ export default function Dashboard({ active }: { active: boolean }) {
         if (mounted) {
           setStatus(s);
           if (!initializedRef.current) {
-            setMode(s.mode);
-            setFromDays(s.from_days);
+            const savedMode = localStorage.getItem("archiver:last-sync-mode");
+            const savedDaysRaw = localStorage.getItem("archiver:last-sync-days");
+            const savedDays = savedDaysRaw === null ? Number.NaN : Number(savedDaysRaw);
+            setMode(savedMode === "full" || savedMode === "update" ? savedMode : s.mode);
+            setFromDays(Number.isFinite(savedDays) && savedDays >= 0 ? savedDays : s.from_days);
             initializedRef.current = true;
           }
         }
       } catch { /* server not ready yet */ }
     };
     tick();
-    const id = setInterval(tick, 2000);
+    const id = setInterval(tick, 750);
     return () => { mounted = false; clearInterval(id); };
   }, []);
 
   useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(`ws://${window.location.host}/ws/log`);
-      wsRef.current = ws;
-
-      ws.onmessage = (e) => {
-        if (e.data === "__ping__") return;
-        bufRef.current += e.data;
-        const parts = bufRef.current.split("\n");
-        bufRef.current = parts.pop() ?? "";
+    let mounted = true;
+    let last = 0;
+    const consume = (text: string, accountKey: string | null) => {
+        const bufferKey = accountKey ?? "";
+        const buffered = (logBuffersRef.current.get(bufferKey) ?? "") + text;
+        const parts = buffered.split("\n");
+        logBuffersRef.current.set(bufferKey, parts.pop() ?? "");
         const newLines = parts.filter(l => l.length > 0);
         if (newLines.length > 0) {
-          setLogLines(prev => [...prev.slice(-2000), ...newLines]);
+          setLogLines(prev => [
+            ...prev,
+            ...newLines.map(line => ({ text: line, accountKey })),
+          ].slice(-5000));
         }
-      };
-
-      ws.onclose = () => {
-        setTimeout(() => { if (wsRef.current === ws) connect(); }, 3000);
-      };
     };
-    connect();
-    return () => {
-      const ws = wsRef.current;
-      if (ws) { wsRef.current = null; ws.close(); }
+    const poll = async () => {
+      try {
+        const result = await getLogs(last);
+        if (!mounted) return;
+        for (const event of result.events) consume(event.text, event.account_key);
+        last = result.last;
+      } catch { /* retry on the next interval */ }
     };
+    void poll();
+    const id = setInterval(poll, 500);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
 
   useEffect(() => {
     const el = logRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    if (atBottom) el.scrollTop = el.scrollHeight;
-  }, [logLines]);
+    if (el && followLog) el.scrollTop = el.scrollHeight;
+  }, [logLines, followLog]);
 
   useEffect(() => {
     if (!status.scheduler_active || !status.next_sync_at) {
@@ -395,6 +574,30 @@ export default function Dashboard({ active }: { active: boolean }) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [mode, fromDays]);
+
+  const handleRetryAccounts = useCallback(async (items: Status["progress"]) => {
+    if (status.running) return;
+    setError("");
+    try {
+      const accounts = await getAccounts();
+      const entryIds = items.flatMap(item => {
+        const entry = accounts.entries.find(candidate => {
+          const candidateId = candidate.handle.includes("|")
+            ? candidate.handle.split("|").pop()!
+            : candidate.handle;
+          return candidate.platform === item.platform && candidateId === item.account_id;
+        });
+        return entry ? [entry.id] : [];
+      });
+      const uniqueEntryIds = [...new Set(entryIds)];
+      if (uniqueEntryIds.length === 0) throw new Error(t("dash.retry_accounts_missing"));
+      await startSync(status.mode, status.from_days, null, uniqueEntryIds);
+      setSelectedLogKey(null);
+      setStatus(current => ({ ...current, running: true, status: "Running…" }));
+    } catch (retryError: unknown) {
+      setError(retryError instanceof Error ? retryError.message : String(retryError));
+    }
+  }, [status.running, status.mode, status.from_days, t]);
 
   const loadHistory = useCallback(() => {
     setHistoryLoading(true);
@@ -425,6 +628,44 @@ export default function Dashboard({ active }: { active: boolean }) {
     }
   }, []);
 
+  const handleMaintenance = useCallback(async (creatorIds: string[] | null) => {
+    setError("");
+    try {
+      await startMaintenance(creatorIds);
+      setStatus(s => ({ ...s, running: true, status: "Maintenance…" }));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const scopedLogLines = selectedLogKey
+    ? logLines.filter(line => line.accountKey === selectedLogKey)
+    : logLines;
+  const scopedLogText = scopedLogLines.map(line => line.text);
+  const modeLogLines = simpleLog ? simplifyLines(scopedLogText) : scopedLogText;
+  const query = logQuery.trim().toLocaleLowerCase();
+  const visibleLogLines = query
+    ? modeLogLines.filter(line => line.toLocaleLowerCase().includes(query))
+    : modeLogLines;
+  const activeProgress = [...(status.progress ?? [])]
+    .reverse()
+    .sort((first, second) =>
+      Number(first.state === "finished") - Number(second.state === "finished")
+    );
+  const incompleteProgress = activeProgress.filter(
+    item => item.state !== "finished"
+  );
+  const completedProgress = activeProgress.filter(
+    item => item.state === "finished"
+  );
+  const visibleProgress = showCompletedProgress
+    ? [...incompleteProgress, ...completedProgress]
+    : incompleteProgress;
+  const selectedProgress = activeProgress.find(item => item.key === selectedLogKey);
+  const failedSyncProgress = activeProgress.filter(
+    item => item.operation === "sync" && item.state === "error"
+  );
+
   return (
     <div className="flex flex-col h-full bg-bg overflow-hidden">
       {/* ── Status strip ─────────────────────────────────── */}
@@ -443,6 +684,7 @@ export default function Dashboard({ active }: { active: boolean }) {
       <div className="flex items-center gap-3 px-5 py-2.5 border-b border-border/50 shrink-0">
         <button
           onClick={() => setShowSyncModal(true)}
+          title="Start sync (Ctrl+Shift+S)"
           disabled={status.running}
           className="px-4 py-2 rounded text-sm font-medium bg-accent text-white
                      disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
@@ -456,6 +698,14 @@ export default function Dashboard({ active }: { active: boolean }) {
                      disabled:opacity-40 disabled:cursor-not-allowed hover:bg-hover transition-colors"
         >
           {t("dash.stop")}
+        </button>
+        <button
+          onClick={() => setShowMaintenanceModal(true)}
+          disabled={status.running}
+          className="px-4 py-2 rounded text-sm font-medium bg-panel border border-border text-text
+                     disabled:opacity-40 disabled:cursor-not-allowed hover:bg-hover transition-colors"
+        >
+          {t("dash.maintenance")}
         </button>
 
         <div className="w-px h-5 bg-border mx-1" />
@@ -491,7 +741,7 @@ export default function Dashboard({ active }: { active: boolean }) {
           {(["update", "full"] as const).map(m => (
             <button
               key={m}
-              onClick={() => setMode(m)}
+              onClick={() => { setMode(m); localStorage.setItem("archiver:last-sync-mode", m); }}
               className={`px-3 py-1.5 transition-colors ${
                 mode === m ? "bg-accent text-white" : "bg-panel text-dim hover:bg-hover"
               }`}
@@ -508,7 +758,11 @@ export default function Dashboard({ active }: { active: boolean }) {
               type="number"
               min={0}
               value={fromDays}
-              onChange={e => setFromDays(Math.max(0, Number(e.target.value)))}
+              onChange={e => {
+                const value = Math.max(0, Number(e.target.value));
+                setFromDays(value);
+                localStorage.setItem("archiver:last-sync-days", String(value));
+              }}
               className="w-14 px-2 py-1 rounded bg-bg border border-border text-text text-xs
                          focus:outline-none focus:border-accent"
             />
@@ -552,7 +806,7 @@ export default function Dashboard({ active }: { active: boolean }) {
           </button>
         ))}
         {activeTab === "log" && (
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex items-center gap-1 min-w-0">
             <div className="flex rounded overflow-hidden border border-border text-xs mr-2">
               {(["simple", "full"] as const).map(v => (
                 <button
@@ -568,19 +822,51 @@ export default function Dashboard({ active }: { active: boolean }) {
                 </button>
               ))}
             </div>
+            <input
+              ref={logSearchRef}
+              value={logQuery}
+              onChange={e => setLogQuery(e.target.value)}
+              placeholder={t("dash.log_search")}
+              className="w-40 px-2.5 py-1.5 rounded border border-border bg-bg text-xs text-text
+                         placeholder:text-dim focus:outline-none focus:border-accent"
+            />
             <button
-              onClick={() => {
-                const lines = simpleLog ? simplifyLines(logLines) : logLines;
-                navigator.clipboard.writeText(lines.join("\n")).catch(() => {});
-              }}
-              disabled={logLines.length === 0}
-              className="px-4 py-2 text-sm text-dim hover:text-text disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              onClick={() => setWrapLog(v => !v)}
+              className={`px-2.5 py-1.5 text-xs rounded border transition-colors ${
+                wrapLog ? "border-accent text-accent bg-accent/10" : "border-border text-dim hover:text-text"
+              }`}
             >
-              {t("dash.copy")}
+              {t("dash.log_wrap")}
             </button>
             <button
-              onClick={() => setLogLines([])}
-              className="px-4 py-2 text-sm text-dim hover:text-text transition-colors"
+              onClick={() => setFollowLog(v => !v)}
+              className={`px-2.5 py-1.5 text-xs rounded border transition-colors ${
+                followLog ? "border-accent text-accent bg-accent/10" : "border-border text-dim hover:text-text"
+              }`}
+            >
+              {t("dash.log_follow")}
+            </button>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(visibleLogLines.join("\n"))
+                  .then(() => {
+                    setCopiedLog(true);
+                    setTimeout(() => setCopiedLog(false), 1500);
+                  })
+                  .catch(() => {});
+              }}
+              disabled={visibleLogLines.length === 0}
+              className="px-3 py-2 text-xs text-dim hover:text-text disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              {copiedLog ? t("dash.log_copied") : t("dash.copy")}
+            </button>
+            <button
+              onClick={() => {
+                setLogLines([]);
+                setLogQuery("");
+                logBuffersRef.current.clear();
+              }}
+              className="px-3 py-2 text-xs text-dim hover:text-text transition-colors"
             >
               {t("dash.clear")}
             </button>
@@ -598,19 +884,172 @@ export default function Dashboard({ active }: { active: boolean }) {
 
       {/* ── Log panel ────────────────────────────────────── */}
       {activeTab === "log" && (
-        <div
-          ref={logRef}
-          className="flex-1 overflow-y-auto font-mono text-xs leading-5 p-4 bg-log-bg"
-          style={{ wordBreak: "break-all" }}
-        >
-          {logLines.length === 0 ? (
-            <span className="text-dim">{t("dash.log_empty")}</span>
-          ) : (
-            (simpleLog ? simplifyLines(logLines) : logLines)
-              .map((line, i) => (
-                <div key={i} className={classifyLine(line)}>{line}</div>
-              ))
+        <div className="flex-1 min-h-0 flex flex-col bg-log-bg">
+          {activeProgress.length > 0 && (
+            <div className="shrink-0 border-b border-border/60 px-4 py-2.5">
+              <div className="mb-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLogKey(null)}
+                  className={`rounded border px-2.5 py-1 text-[10px] transition-colors ${
+                    selectedLogKey === null
+                      ? "border-accent bg-accent/10 text-accent"
+                      : "border-border/70 bg-panel/50 text-dim hover:text-text"
+                  }`}
+                >
+                  {t("dash.log_all_accounts")}
+                </button>
+                {selectedProgress && (
+                  <span className="truncate text-[10px] text-dim">
+                    {t("dash.log_account")}: {selectedProgress.account}
+                  </span>
+                )}
+                {failedSyncProgress.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={status.running}
+                    onClick={() => void handleRetryAccounts(failedSyncProgress)}
+                    className="ml-auto rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[10px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {t("dash.retry_all")} ({failedSyncProgress.length})
+                  </button>
+                )}
+              </div>
+              {completedProgress.length > 0 && (
+                <div className="mb-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setShowCompletedProgress(value => !value)}
+                    className="rounded border border-border/70 bg-panel/50 px-2.5 py-1 text-[10px] text-dim transition-colors hover:border-accent/50 hover:text-text"
+                  >
+                    {showCompletedProgress
+                      ? t("dash.progress_hide_completed")
+                      : t("dash.progress_show_completed").replace(
+                          "{count}", String(completedProgress.length)
+                        )}
+                  </button>
+                </div>
+              )}
+              {visibleProgress.length > 0 && (
+                <div
+                  className="grid max-h-[38vh] gap-2.5 overflow-y-auto overscroll-contain pr-1"
+                  style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}
+                >
+                  {visibleProgress.map(item => {
+                  const active = item.state === "running"
+                    || item.state === "scanning"
+                    || item.state === "downloading";
+                  const finished = item.state === "finished";
+                  return (
+                    <div
+                      key={item.key}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedLogKey(
+                        current => current === item.key ? null : item.key
+                      )}
+                      onKeyDown={event => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setSelectedLogKey(
+                            current => current === item.key ? null : item.key
+                          );
+                        }
+                      }}
+                      onMouseMove={event => {
+                        if (item.state !== "error") return;
+                        setErrorTooltip({
+                          text: item.error || t("dash.progress_error_hint"),
+                          x: Math.min(event.clientX + 14, window.innerWidth - 334),
+                          y: Math.min(event.clientY + 14, window.innerHeight - 90),
+                        });
+                      }}
+                      onMouseLeave={() => setErrorTooltip(null)}
+                      className={`progress-card min-w-0 cursor-pointer rounded border bg-panel/50 px-3 py-2
+                        ${selectedLogKey === item.key ? "ring-1 ring-accent border-accent" :
+                          active ? "progress-card-active border-accent/50"
+                          : finished ? "progress-card-finished border-green-500/30"
+                          : item.state === "error" ? "border-red-500/40"
+                          : "border-border/70"}`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <HistoryAvatar platform={item.platform} handle={item.account_id} />
+                        <span className="text-xs font-medium text-text truncate" title={item.account}>
+                          {item.account}
+                        </span>
+                        <span className={`ml-auto w-1.5 h-1.5 rounded-full shrink-0 ${
+                          active ? "bg-accent animate-pulse"
+                            : finished ? "bg-green-400"
+                            : item.state === "error" ? "bg-red-400" : "bg-dim"
+                        }`} />
+                      </div>
+                      <div className="flex items-center justify-between mt-2 text-[10px] text-dim">
+                        <span>{t(`dash.progress_state_${item.state}`)}</span>
+                        <span className="font-mono">
+                          {active && item.done != null && item.total
+                            ? `${item.done} / ${Math.max(item.done, item.total)} · ${item.percent?.toFixed(1) ?? "?"}%`
+                            : item.percent != null
+                              ? `${item.percent.toFixed(1)}%`
+                            : item.local != null
+                              ? `${item.local} / ${item.remote ?? "?"}`
+                              : "—"}
+                        </span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-border mt-1.5 overflow-hidden">
+                        {item.percent != null ? (
+                          <div
+                            className="h-full bg-accent transition-[width] duration-300"
+                            style={{ width: `${item.percent}%` }}
+                          />
+                        ) : active ? (
+                          <div className="progress-indeterminate h-full w-1/3 bg-accent rounded-full" />
+                        ) : finished ? (
+                          <div className="progress-complete h-full w-full bg-green-400/70" />
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+                </div>
+              )}
+            </div>
           )}
+          <div
+            ref={logRef}
+            onScroll={e => {
+              const el = e.currentTarget;
+              setFollowLog(el.scrollHeight - el.scrollTop - el.clientHeight < 24);
+            }}
+            className="flex-1 overflow-auto font-mono text-xs leading-5 px-4 py-3"
+          >
+            {visibleLogLines.length === 0 ? (
+              <span className="text-dim">
+                {scopedLogLines.length === 0 ? t("dash.log_empty") : t("dash.log_no_match")}
+              </span>
+            ) : (
+              <div className={wrapLog ? "min-w-0" : "min-w-max"}>
+                {visibleLogLines.map((line, i) => (
+                  <div
+                    key={`${i}-${line}`}
+                    className={`${classifyLine(line)} ${
+                      wrapLog ? "whitespace-pre-wrap break-words" : "whitespace-pre"
+                    } hover:bg-white/[0.025]`}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="h-7 shrink-0 border-t border-border/60 px-4 flex items-center gap-3 text-[11px] text-dim">
+            <span>{visibleLogLines.length} / {scopedLogLines.length} {t("dash.log_lines")}</span>
+            <span>·</span>
+            <span>{simpleLog ? t("dash.log_simple") : t("dash.log_full")}</span>
+            <span className="ml-auto flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${followLog ? "bg-green-400" : "bg-dim"}`} />
+              {followLog ? t("dash.log_following") : t("dash.log_paused")}
+            </span>
+          </div>
         </div>
       )}
 
@@ -637,6 +1076,20 @@ export default function Dashboard({ active }: { active: boolean }) {
           onClose={() => setShowSyncModal(false)}
           onStart={handleStart}
         />
+      )}
+      {showMaintenanceModal && (
+        <StartMaintenanceModal
+          onClose={() => setShowMaintenanceModal(false)}
+          onStart={handleMaintenance}
+        />
+      )}
+      {errorTooltip && (
+        <div
+          className="pointer-events-none fixed z-[300] max-w-xs rounded border border-red-500/40 bg-panel px-3 py-2 text-xs leading-5 text-text shadow-xl"
+          style={{ left: errorTooltip.x, top: errorTooltip.y }}
+        >
+          {errorTooltip.text}
+        </div>
       )}
     </div>
   );

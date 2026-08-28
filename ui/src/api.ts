@@ -1,3 +1,19 @@
+export interface AccountProgress {
+  key:        string;
+  platform:   string;
+  account:    string;
+  account_id: string;
+  operation:  "sync" | "maintenance" | "missing";
+  state:      "running" | "scanning" | "downloading" | "finished" | "stopped" | "error";
+  percent?:   number | null;
+  done?:      number;
+  total?:     number | null;
+  local?:     number;
+  remote?:    number | null;
+  downloaded?: number;
+  error?:      string | null;
+}
+
 export interface Status {
   running:          boolean;
   status:           string;
@@ -9,6 +25,7 @@ export interface Status {
   total_downloads:  number;
   scheduler_active: boolean;
   next_sync_at:     number;
+  progress:         AccountProgress[];
 }
 
 export interface HistoryUser {
@@ -16,6 +33,13 @@ export interface HistoryUser {
   handle?:  string;
   display:  string;
   count:    number;
+  downloaded_posts?:   number;
+  total_posts?:        number;
+  remote_total?:       number | null;
+  local_remote_posts?: number | null;
+  remote_ids_seen?:    number;
+  remote_ids_complete?: boolean;
+  verified?:           boolean;
   corrupt:  number;
   files:    string[];
   folder:   string;
@@ -31,14 +55,6 @@ export interface HistoryEntry {
   users:    HistoryUser[];
 }
 
-export interface DownloadFile {
-  name:     string;
-  path:     string;
-  platform: string;
-  size:     number;
-  date:     string;
-}
-
 export interface TgStatus {
   status:    "running" | "stopped" | "error";
   token_set: boolean;
@@ -47,14 +63,26 @@ export interface TgStatus {
 export interface Creator { id: string; name: string; }
 export interface Entry   { id: string; platform: string; handle: string; creator_id: string | null; }
 export interface AccountsData { creators: Creator[]; entries: Entry[]; }
+export interface ViewerAccount {
+  platform: string;
+  account_id: string;
+  account: string;
+  avatar: string;
+  group: string;
+  posts: number;
+}
 
 export interface AppSettings {
   download_path?:        string;
   parallel_workers?:     number;
+  per_account_workers?:  number;
   sleep_user?:           number;
   sleep_req?:            number;
   auto_update_enabled?:  boolean;
   auto_update_interval?: number;
+  viewer_volume?:        number;
+  viewer_loop?:          boolean;
+  viewer_theme?:         "dark" | "light";
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -81,12 +109,27 @@ const put = (body: unknown) => ({
 
 // Status & sync
 export const getStatus    = () => request<Status>("/api/status");
-export const startSync    = (mode?: string, from_days?: number, creator_ids?: string[] | null) =>
-  request("/api/start", json({ mode, from_days, creator_ids }));
+export const startSync    = (
+  mode?: string,
+  from_days?: number,
+  creator_ids?: string[] | null,
+  entry_ids?: string[] | null,
+) => request("/api/start", json({ mode, from_days, creator_ids, entry_ids }));
 export const stopSync     = () => request("/api/stop", { method: "POST" });
+export const startMaintenance = (creator_ids?: string[] | null) =>
+  request("/api/maintenance", json({ creator_ids }));
+export const getLogs      = (after = 0) =>
+  request<{ last: number; events: { seq: number; text: string; account_key: string | null }[] }>(
+    `/api/logs?after=${after}`);
 
 // Accounts
 export const getAccounts  = () => request<AccountsData>("/api/accounts");
+export const getViewerAccounts = () =>
+  request<{ accounts: ViewerAccount[] }>("/viewer/api/accounts");
+
+export const openPostInViewer = (path: string) => {
+  window.dispatchEvent(new CustomEvent("archiver:open-viewer", { detail: `file:${path}` }));
+};
 export const addEntry     = (platform: string, handle: string, creator_id?: string | null) =>
   request<Entry>("/api/accounts/entries", json({ platform, handle, creator_id }));
 export const addEntryFromLink = (url: string) =>
@@ -94,6 +137,9 @@ export const addEntryFromLink = (url: string) =>
     "/api/accounts/add_link", json({ url }));
 export const removeEntry  = (id: string) =>
   request<void>(`/api/accounts/entries/${id}`, { method: "DELETE" });
+export const clearEntryArchive = (id: string) =>
+  request<{ ok: boolean; cleared: boolean }>(
+    `/api/accounts/entries/${id}/archive`, { method: "DELETE" });
 export const assignEntry  = (id: string, creator_id: string | null) =>
   request(`/api/accounts/entries/${id}`, {
     method: "PATCH",
@@ -123,11 +169,6 @@ export const saveCookies  = (platform: string, content: string) =>
 export const downloadUrl  = (url: string) =>
   request<{ ok: boolean; platform: string }>("/api/download", json({ url }));
 
-// Downloads file list
-export const listDownloads  = (limit = 500) =>
-  request<DownloadFile[]>(`/api/downloads?limit=${limit}`);
-export const deleteDownload = (path: string) =>
-  request<void>(`/api/downloads/file?path=${encodeURIComponent(path)}`, { method: "DELETE" });
 export const openFile = (path: string) =>
   request<{ ok: boolean }>(`/api/files/open?path=${encodeURIComponent(path)}`, { method: "POST" });
 export const redownloadFile = (platform: string, path?: string, postId?: string) =>
@@ -164,8 +205,10 @@ export interface PostEntry {
   post_id:  string;
   date:     string;
   file:     string;
-  status:   "ok" | "gone" | "unchecked" | "error";
+  files?:   string[];
+  status:   "ok" | "gone" | "unchecked" | "missing" | "error";
   checked:  string;
+  expected_name?: string;
 }
 
 export interface CheckStatus {
@@ -187,9 +230,14 @@ export const startCheck     = (platform: string, accountId: string) =>
     `/api/posts/${platform}/${encodeURIComponent(accountId)}/check`, { method: "POST" });
 export const getCheckStatus = (platform: string, accountId: string) =>
   request<CheckStatus>(`/api/posts/${platform}/${encodeURIComponent(accountId)}/check`);
+export const downloadMissing = (platform: string, accountId: string, postIds: string[]) =>
+  request<{ ok: boolean }>("/api/posts/download-missing", json({
+    platform, account_id: accountId, post_ids: postIds,
+  }));
 
 export const PLATFORM_META: Record<string, { label: string; icon: string; iconUrl: string; color: string; bg: string }> = {
   x:        { label: "X",        icon: "𝕏", iconUrl: "/icons/x.svg",        color: "#ffffff", bg: "#1d9bf0" },
   douyin:   { label: "Douyin",   icon: "抖", iconUrl: "/icons/douyin.svg",   color: "#fe2c55", bg: "#000000" },
   bilibili: { label: "Bilibili", icon: "哔", iconUrl: "/icons/bilibili.svg", color: "#fb7299", bg: "#ffffff" },
+  xiaohongshu: { label: "小红书", icon: "RED", iconUrl: "/icons/xiaohongshu.svg", color: "#ff2442", bg: "#ffffff" },
 };
