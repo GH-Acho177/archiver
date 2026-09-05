@@ -214,7 +214,7 @@ uv run pyinstaller packaging/Archiver.spec
 
 The onedir build is written to `dist/Archiver/`. Compile `packaging/installer.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to create the installer.
 
-The downloader binaries, runtime databases, cookies, browser profiles, downloads, and DigiViewer project are intentionally excluded from this repository.
+The downloader binaries, runtime databases, cookies, browser profiles, downloads, and the separate DigiViewer project are intentionally excluded from this repository.
 
 ## Project layout
 

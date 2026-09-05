@@ -49,9 +49,7 @@ node_modules/
 ui/dist/.index_app.html
 ui/debug.log
 
-# ── Separate local DigiViewer project ────────────────────────────────────────
-digiviewer/
-run_digiviewer.py
+# ── Local DigiViewer runtime state ───────────────────────────────────────────
 config/digiviewer.db
 config/digiviewer_previews/
 
